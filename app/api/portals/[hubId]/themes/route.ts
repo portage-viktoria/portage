@@ -72,8 +72,9 @@ export async function GET(
     return NextResponse.json({ error: "Invalid hub_id" }, { status: 400 });
   }
 
-  // TODO: replace with real session-resolved user_id once Supabase Auth is in
-  const userId = "00000000-0000-0000-0000-000000000000";
+  // During this milestone, connections are stored with a null user_id.
+  // Once Supabase Auth is wired up, resolve the user from the session instead.
+  const userId: string | null = null;
 
   let accessToken: string;
   try {

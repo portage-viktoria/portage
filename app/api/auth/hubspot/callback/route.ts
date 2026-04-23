@@ -92,11 +92,12 @@ export async function GET(request: NextRequest) {
   }
 
   // Step 6: store connection
-  // NOTE: stateRow.user_id is null during first-integration testing.
-  // Once Supabase Auth is wired up, this will be the real authenticated user.
+  // NOTE: userId is null during this milestone because Supabase Auth isn't
+  // wired up yet. The next milestone replaces null with the authenticated
+  // user's real id and re-enables the FK constraint.
   try {
     await storeConnection({
-      userId: stateRow.user_id ?? "00000000-0000-0000-0000-000000000000",
+      userId: stateRow.user_id ?? null,
       hubId: portalInfo.hub_id,
       portalDomain: portalInfo.hub_domain,
       refreshToken: tokens.refresh_token,
