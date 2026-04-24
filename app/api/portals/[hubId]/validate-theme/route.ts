@@ -4,13 +4,14 @@
  * POST /api/portals/[hubId]/validate-theme
  * Body: { path: string }
  *
- * The user pastes a theme folder path (e.g. "@marketplace/Stuff_Matters_Inc_/Focus",
- * "MyCustomTheme", "Acme/child-theme"). We normalize it, try to fetch
+ * The user pastes a theme folder path. We normalize it, try to fetch
  * `<path>/theme.json`, and return either the theme's metadata or a clear error.
  *
- * This replaces the old automatic-discovery approach. See the conversation log
- * for why: the Source Code API metadata endpoint doesn't support root-level
- * listing, so we ask the user where their theme lives instead.
+ * Notes on theme.json quirks:
+ *   - `author` may be a string ("Helpful Hero") OR an object ({ name, email }).
+ *     We normalize either form into a single display string.
+ *   - Other fields may be missing entirely. Every field we surface is optional
+ *     except `label` and `path`.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -18,11 +19,14 @@ import { getAccessToken } from "@/lib/portal-connections";
 
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
 
+// theme.json is author's choice — we accept the shapes we've seen in the wild
+type ThemeAuthor = string | { name?: string; email?: string; url?: string };
+
 type ThemeJson = {
   label?: string;
   preview_path?: string;
   screenshot_path?: string;
-  author?: string;
+  author?: ThemeAuthor;
   version?: string;
   description?: string;
 };
@@ -43,13 +47,6 @@ type ValidationFailure = {
   hint?: string;
 };
 
-/**
- * Normalize whatever the user pasted into a clean theme path:
- * - Trim whitespace
- * - Strip leading/trailing slashes
- * - Collapse multiple slashes into one
- * - Reject obviously invalid paths early
- */
 function normalizePath(raw: string): { ok: true; path: string } | { ok: false; error: string } {
   if (typeof raw !== "string") {
     return { ok: false, error: "Theme path is required" };
@@ -60,18 +57,13 @@ function normalizePath(raw: string): { ok: true; path: string } | { ok: false; e
     return { ok: false, error: "Theme path cannot be empty" };
   }
 
-  // Strip leading/trailing slashes
   path = path.replace(/^\/+/, "").replace(/\/+$/, "");
-
-  // Collapse duplicate slashes
   path = path.replace(/\/{2,}/g, "/");
 
-  // Reject paths with invalid characters
   if (/[\s<>"'`]/.test(path)) {
     return { ok: false, error: "Theme path contains invalid characters" };
   }
 
-  // Reject path traversal attempts
   if (path.includes("..")) {
     return { ok: false, error: "Theme path cannot contain '..'" };
   }
@@ -81,6 +73,32 @@ function normalizePath(raw: string): { ok: true; path: string } | { ok: false; e
   }
 
   return { ok: true, path };
+}
+
+/**
+ * Coerce an author field of any shape into a single display string, or
+ * undefined if the field is empty/missing. This keeps the API contract simple
+ * and guarantees the client never has to handle an object for this field.
+ */
+function normalizeAuthor(raw: ThemeAuthor | undefined): string | undefined {
+  if (!raw) return undefined;
+
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+
+  if (typeof raw === "object") {
+    const name = typeof raw.name === "string" ? raw.name.trim() : "";
+    if (name.length > 0) return name;
+
+    const email = typeof raw.email === "string" ? raw.email.trim() : "";
+    if (email.length > 0) return email;
+
+    return undefined;
+  }
+
+  return undefined;
 }
 
 function classifyThemeSource(path: string): "marketplace" | "nested" | "custom" {
@@ -142,7 +160,6 @@ export async function POST(
   }
   const themePath = normalized.path;
 
-  // During this milestone connections are stored with null user_id.
   const userId: string | null = null;
 
   let accessToken: string;
@@ -177,15 +194,28 @@ export async function POST(
     return NextResponse.json(failure, { status: 502 });
   }
 
+  // Build the success response. Every field except label + path + source is
+  // optional — we only include fields that have real, non-empty values.
   const success: ValidationSuccess = {
     ok: true,
     path: themePath,
-    label: body.label ?? themePath.split("/").pop() ?? themePath,
-    author: body.author,
-    version: body.version,
-    description: body.description,
+    label:
+      typeof body.label === "string" && body.label.trim().length > 0
+        ? body.label.trim()
+        : themePath.split("/").pop() ?? themePath,
     source: classifyThemeSource(themePath),
   };
+
+  const author = normalizeAuthor(body.author);
+  if (author) success.author = author;
+
+  if (typeof body.version === "string" && body.version.trim().length > 0) {
+    success.version = body.version.trim();
+  }
+
+  if (typeof body.description === "string" && body.description.trim().length > 0) {
+    success.description = body.description.trim();
+  }
 
   return NextResponse.json(success);
 }

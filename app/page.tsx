@@ -1,18 +1,15 @@
 /**
  * Portage landing page — theme path input milestone.
  *
- * After a portal is connected, the user pastes the folder path to their
- * target theme (e.g. `@marketplace/Stuff_Matters_Inc_/Focus`). The app
- * validates the path by fetching `<path>/theme.json` and shows the theme's
- * metadata on success, or a helpful error on failure.
- *
- * This replaces the prior attempt at automatic theme discovery — see the
- * validate-theme route for the reasoning.
+ * Includes defensive rendering: every field from the validation response is
+ * checked to be a string before being rendered inline, and the success card
+ * is wrapped in an error boundary so an unexpected response shape degrades
+ * gracefully instead of white-screening the whole app.
  */
 
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Component, ReactNode } from "react";
 import {
   Link2,
   Check,
@@ -45,6 +42,37 @@ type ValidationState =
   | { status: "success"; data: Validated }
   | { status: "error"; error: ValidationError };
 
+// Helper: render a value only if it's a non-empty string. This guards against
+// any remaining shape surprises from the server (defense in depth alongside
+// the server-side normalization).
+function safeString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+// Simple error boundary — if anything in the validation card throws during
+// render, we show a friendly fallback instead of the app crashing.
+class SafeRender extends Component<
+  { children: ReactNode; fallback: ReactNode },
+  { hasError: boolean }
+> {
+  constructor(props: { children: ReactNode; fallback: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error) {
+    console.error("[SafeRender] caught:", error);
+  }
+  render() {
+    if (this.state.hasError) return this.props.fallback;
+    return this.props.children;
+  }
+}
+
 export default function Home() {
   const [hubId, setHubId] = useState<string | null>(null);
   const [connectError, setConnectError] = useState<string | null>(null);
@@ -61,7 +89,6 @@ export default function Home() {
     if (connected) setHubId(connected);
   }, []);
 
-  // Reset validation whenever the path changes after a previous validation
   useEffect(() => {
     if (validation.status === "success" || validation.status === "error") {
       setValidation({ status: "idle" });
@@ -79,10 +106,15 @@ export default function Home() {
         body: JSON.stringify({ path: themePath }),
       });
       const data = await res.json();
-      if (data.ok) {
+      if (data && data.ok === true) {
         setValidation({ status: "success", data });
-      } else {
+      } else if (data && data.ok === false) {
         setValidation({ status: "error", error: data });
+      } else {
+        setValidation({
+          status: "error",
+          error: { ok: false, error: "Unexpected response from server." },
+        });
       }
     } catch {
       setValidation({
@@ -155,7 +187,6 @@ export default function Home() {
               </div>
             </div>
 
-            {/* Theme path input */}
             <div className="mb-2 flex items-center justify-between">
               <label className="text-sm font-medium" style={{ color: "#1A1814" }}>
                 Target theme path
@@ -247,60 +278,22 @@ export default function Home() {
               </button>
             </div>
 
-            {/* Validation result */}
             {validation.status === "success" && (
-              <div
-                className="mt-4 p-4 rounded"
-                style={{ backgroundColor: "#FFFFFF", border: "1px solid #B8D0A8" }}
-              >
-                <div className="flex items-start gap-3">
+              <SafeRender
+                fallback={
                   <div
-                    className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5"
-                    style={{ backgroundColor: "#5A7048" }}
+                    className="mt-4 p-4 rounded flex items-start gap-3"
+                    style={{ backgroundColor: "#F5EAD1", color: "#B8822A" }}
                   >
-                    <Check className="w-3.5 h-3.5" strokeWidth={2.5} style={{ color: "#FAF7F2" }} />
-                  </div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-medium text-base" style={{ color: "#1A1814" }}>
-                        {validation.data.label}
-                      </span>
-                      <SourceBadge source={validation.data.source} />
-                      {validation.data.version && (
-                        <span
-                          className="text-xs"
-                          style={{ color: "#8B8478", fontFamily: "ui-monospace, monospace" }}
-                        >
-                          v{validation.data.version}
-                        </span>
-                      )}
-                    </div>
-                    {validation.data.author && (
-                      <div className="text-sm mt-0.5" style={{ color: "#5C574E" }}>
-                        by {validation.data.author}
-                      </div>
-                    )}
-                    {validation.data.description && (
-                      <div
-                        className="text-sm mt-2"
-                        style={{ color: "#5C574E", lineHeight: 1.5 }}
-                      >
-                        {validation.data.description}
-                      </div>
-                    )}
-                    <div
-                      className="text-xs mt-3 pt-3"
-                      style={{
-                        color: "#8B8478",
-                        fontFamily: "ui-monospace, monospace",
-                        borderTop: "1px dashed #E8E2D6",
-                      }}
-                    >
-                      {validation.data.path}
+                    <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
+                    <div className="text-sm">
+                      Theme found, but we couldn't display its metadata. The theme is still usable — this is just a display issue.
                     </div>
                   </div>
-                </div>
-              </div>
+                }
+              >
+                <SuccessCard data={validation.data} />
+              </SafeRender>
             )}
 
             {validation.status === "error" && (
@@ -310,9 +303,11 @@ export default function Home() {
               >
                 <AlertCircle className="w-5 h-5 flex-shrink-0 mt-0.5" />
                 <div>
-                  <div className="text-sm font-medium">{validation.error.error}</div>
-                  {validation.error.hint && (
-                    <div className="text-sm mt-1 opacity-80">{validation.error.hint}</div>
+                  <div className="text-sm font-medium">
+                    {safeString(validation.error.error) ?? "Something went wrong."}
+                  </div>
+                  {safeString(validation.error.hint) && (
+                    <div className="text-sm mt-1 opacity-80">{safeString(validation.error.hint)}</div>
                   )}
                 </div>
               </div>
@@ -321,6 +316,66 @@ export default function Home() {
         )}
       </div>
     </main>
+  );
+}
+
+function SuccessCard({ data }: { data: Validated }) {
+  const label = safeString(data.label) ?? "Theme";
+  const author = safeString(data.author);
+  const version = safeString(data.version);
+  const description = safeString(data.description);
+  const path = safeString(data.path) ?? "";
+
+  return (
+    <div
+      className="mt-4 p-4 rounded"
+      style={{ backgroundColor: "#FFFFFF", border: "1px solid #B8D0A8" }}
+    >
+      <div className="flex items-start gap-3">
+        <div
+          className="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5"
+          style={{ backgroundColor: "#5A7048" }}
+        >
+          <Check className="w-3.5 h-3.5" strokeWidth={2.5} style={{ color: "#FAF7F2" }} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-medium text-base" style={{ color: "#1A1814" }}>
+              {label}
+            </span>
+            <SourceBadge source={data.source} />
+            {version && (
+              <span
+                className="text-xs"
+                style={{ color: "#8B8478", fontFamily: "ui-monospace, monospace" }}
+              >
+                v{version}
+              </span>
+            )}
+          </div>
+          {author && (
+            <div className="text-sm mt-0.5" style={{ color: "#5C574E" }}>
+              by {author}
+            </div>
+          )}
+          {description && (
+            <div className="text-sm mt-2" style={{ color: "#5C574E", lineHeight: 1.5 }}>
+              {description}
+            </div>
+          )}
+          <div
+            className="text-xs mt-3 pt-3 break-all"
+            style={{
+              color: "#8B8478",
+              fontFamily: "ui-monospace, monospace",
+              borderTop: "1px dashed #E8E2D6",
+            }}
+          >
+            {path}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
