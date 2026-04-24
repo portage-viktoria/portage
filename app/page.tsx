@@ -5,16 +5,21 @@
  * When the user returns from the OAuth flow with ?connected=12345 in the URL,
  * shows a success state and lists the themes found in that portal.
  *
- * This is deliberately bare-bones — the Portage prototype UI plugs in later,
- * once we've confirmed the integration plumbing works end-to-end.
+ * Themes are displayed with their source (marketplace / custom / nested) so
+ * it's immediately clear what kind of theme each one is.
  */
 
 "use client";
 
 import { useEffect, useState } from "react";
-import { Link2, Check, AlertCircle } from "lucide-react";
+import { Link2, Check, AlertCircle, Loader2 } from "lucide-react";
 
-type Theme = { path: string; label: string };
+type Theme = {
+  path: string;
+  label: string;
+  source: "marketplace" | "custom" | "nested";
+  author?: string;
+};
 
 export default function Home() {
   const [hubId, setHubId] = useState<string | null>(null);
@@ -45,6 +50,22 @@ export default function Home() {
         setLoadingThemes(false);
       });
   }, [hubId]);
+
+  const sourceBadge = (source: Theme["source"]) => {
+    const config = {
+      marketplace: { label: "Marketplace", bg: "#F5EAD1", fg: "#B8822A" },
+      custom: { label: "Custom", bg: "#F4E4DA", fg: "#C8512A" },
+      nested: { label: "Nested", bg: "#E8EDE1", fg: "#5A7048" },
+    }[source];
+    return (
+      <span
+        className="text-[10px] font-medium uppercase tracking-wider px-2 py-0.5 rounded-full"
+        style={{ backgroundColor: config.bg, color: config.fg, fontFamily: "ui-monospace, monospace" }}
+      >
+        {config.label}
+      </span>
+    );
+  };
 
   return (
     <main className="min-h-screen flex items-center justify-center p-8" style={{ backgroundColor: "#FAF7F2" }}>
@@ -88,12 +109,17 @@ export default function Home() {
             </h2>
 
             {loadingThemes && (
-              <div className="text-sm" style={{ color: "#5C574E" }}>Loading themes…</div>
+              <div className="flex items-center gap-2 text-sm" style={{ color: "#5C574E" }}>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Scanning portal for themes…
+              </div>
             )}
 
-            {themes && themes.length === 0 && (
-              <div className="text-sm" style={{ color: "#5C574E" }}>
-                No themes found in this portal.
+            {themes && themes.length === 0 && !loadingThemes && (
+              <div className="text-sm p-4 rounded" style={{ color: "#5C574E", backgroundColor: "#FFFFFF", border: "1px solid #E8E2D6" }}>
+                No themes found in this portal. If you expected to see a theme here,
+                it may be nested more than 4 levels deep, or in a folder Portage skipped
+                (we ignore HubSpot system folders by default).
               </div>
             )}
 
@@ -102,11 +128,19 @@ export default function Home() {
                 {themes.map((t) => (
                   <li
                     key={t.path}
-                    className="p-3 rounded border text-sm"
+                    className="p-3 rounded border"
                     style={{ backgroundColor: "#FFFFFF", borderColor: "#E8E2D6", color: "#1A1814" }}
                   >
-                    <div className="font-medium">{t.label}</div>
-                    <div className="text-xs mt-1" style={{ color: "#5C574E", fontFamily: "monospace" }}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-medium text-sm">{t.label}</span>
+                      {sourceBadge(t.source)}
+                      {t.author && (
+                        <span className="text-xs" style={{ color: "#8B8478" }}>
+                          by {t.author}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs mt-1" style={{ color: "#5C574E", fontFamily: "ui-monospace, monospace" }}>
                       {t.path}
                     </div>
                   </li>
