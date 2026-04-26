@@ -1,20 +1,24 @@
 /**
- * Source page parser — v2.
+ * Source page parser — v3.
  *
- * Section detection strategy: heading-anchored chunking as the primary path,
- * because headings are the most universal signal across CMS platforms. We
- * look at every <h1> and <h2> in the main content area; each one anchors a
- * new section. Content between two anchors becomes one section.
+ * Section detection by structural-repetition scoring.
  *
- * For each heading anchor, we determine the section's "container element" by
- * walking up the DOM from the heading until we find a parent that's likely
- * a section wrapper. Then we collect that wrapper's content.
+ * Key insight: on essentially every modern page (HubSpot, Webflow, Framer,
+ * WordPress, hand-coded), there exists exactly one DOM level where the
+ * children are the sections we want. Above that level is site chrome and
+ * wrapper divs; below it are the contents of individual sections (including
+ * repeaters that we should NOT treat as separate sections).
  *
- * This handles the common case (WordPress, HubSpot, Webflow, hand-coded) and
- * works regardless of how deeply the DOM is nested. It's also tolerant of
- * weird wrapper class names because it doesn't rely on them at all.
+ * We find that level by walking the DOM and scoring each potential level on:
+ *   1. Child count fitness — pages typically have 4-30 sections
+ *   2. Structural similarity — sections at the same level have similar shapes
+ *   3. Class-name repetition — page builders generate consistent classes per section
+ *   4. Content coverage — the level should cover most visible content
  *
- * Falls back to top-level container detection only if no <h1>/<h2> exist.
+ * The level with the highest combined score wins. Each child becomes a section.
+ *
+ * Falls back to heading-anchored chunking only if no level scores well —
+ * which would happen for pages with weird hand-rolled structure.
  */
 
 import { parse, HTMLElement, Node, NodeType } from "node-html-parser";
@@ -50,6 +54,8 @@ export type DetectedSection = {
   content: SectionContent;
   domPath: string;
   approximateOrder: number;
+  // Diagnostic: how the section was detected, useful for debugging
+  detectionMethod: "structural" | "heading-fallback" | "semantic-section";
 };
 
 export type ParsedPage = {
@@ -59,11 +65,12 @@ export type ParsedPage = {
   sections: DetectedSection[];
   sectionCount: number;
   warnings: string[];
+  detectionMethod: "structural" | "heading-fallback" | "semantic-section" | "none";
   parsedAt: string;
 };
 
 // ============================================================
-// HTML normalization (unchanged from v1)
+// HTML normalization
 // ============================================================
 
 const STRIP_TAGS = new Set(["script", "style", "noscript", "iframe", "svg"]);
@@ -84,12 +91,10 @@ function normalizeDom(root: HTMLElement): HTMLElement {
       if (child.nodeType !== NodeType.ELEMENT_NODE) continue;
       const elem = child as HTMLElement;
       const tag = elem.rawTagName?.toLowerCase();
-
       if (tag && STRIP_TAGS.has(tag)) {
         node.removeChild(elem);
         continue;
       }
-
       const attrs = elem.attributes;
       for (const attrName of Object.keys(attrs)) {
         const lower = attrName.toLowerCase();
@@ -97,7 +102,6 @@ function normalizeDom(root: HTMLElement): HTMLElement {
           elem.removeAttribute(attrName);
         }
       }
-
       clean(elem);
     }
   }
@@ -137,15 +141,11 @@ function extractPageDescription(root: HTMLElement): string | undefined {
 }
 
 // ============================================================
-// Content root detection
+// Content root
 // ============================================================
 
 const CHROME_TAGS = new Set(["header", "footer", "nav", "aside"]);
 
-/**
- * Find the main content root, skipping site chrome.
- * Prefer <main>, then <body>, but exclude obvious headers/footers.
- */
 function findContentRoot(root: HTMLElement): HTMLElement {
   const main = root.querySelector("main");
   if (main) return main;
@@ -155,15 +155,295 @@ function findContentRoot(root: HTMLElement): HTMLElement {
 }
 
 /**
- * Check if an element is inside site chrome (header/footer/nav).
- * We don't want headings inside the navigation menu treated as section anchors.
+ * Get the "real" children of an element, filtered to:
+ *  - Only element nodes
+ *  - Not site chrome (header/footer/nav)
+ *  - Not empty/whitespace
  */
+function meaningfulChildren(elem: HTMLElement): HTMLElement[] {
+  const result: HTMLElement[] = [];
+  for (const child of elem.childNodes) {
+    if (child.nodeType !== NodeType.ELEMENT_NODE) continue;
+    const c = child as HTMLElement;
+    const tag = c.rawTagName?.toLowerCase() ?? "";
+    if (CHROME_TAGS.has(tag)) continue;
+    const role = c.getAttribute("role")?.toLowerCase();
+    if (role === "navigation" || role === "banner" || role === "contentinfo") continue;
+    // Skip empty wrappers with no text and no images
+    const text = c.text?.trim() ?? "";
+    const hasImg = c.querySelectorAll("img").length > 0;
+    if (text.length === 0 && !hasImg) continue;
+    result.push(c);
+  }
+  return result;
+}
+
+// ============================================================
+// Structural scoring — the heart of detection
+// ============================================================
+
+type LevelCandidate = {
+  parent: HTMLElement;
+  children: HTMLElement[];
+  depth: number; // depth from content root
+  score: number;
+  signals: {
+    countScore: number;
+    similarityScore: number;
+    classRepetitionScore: number;
+    coverageScore: number;
+  };
+};
+
+/**
+ * Score how well a child count fits the "real section count" expectation.
+ * Most pages have between 4 and 20 sections; we peak around 8-12.
+ *
+ * Returns a score between 0 and 1.
+ */
+function scoreChildCount(count: number): number {
+  if (count < 2) return 0; // a level with 0 or 1 children is never a section level
+  if (count === 2) return 0.3;
+  if (count === 3) return 0.5;
+  if (count >= 4 && count <= 20) return 1.0;
+  if (count <= 30) return 0.7;
+  if (count <= 50) return 0.3;
+  return 0.1; // 50+ children is almost certainly a list/grid, not sections
+}
+
+/**
+ * Compute how structurally similar the children are.
+ *
+ * For each child, we estimate "size" by counting its descendant elements and
+ * total text length. Sections at the same level should be roughly comparable.
+ * We compute the coefficient of variation; lower variation = higher similarity.
+ *
+ * Returns a score between 0 and 1.
+ */
+function scoreStructuralSimilarity(children: HTMLElement[]): number {
+  if (children.length < 2) return 0;
+
+  const sizes = children.map((c) => {
+    const descendantCount = c.querySelectorAll("*").length;
+    const textLength = (c.text ?? "").length;
+    // Combined size signal: descendants + text length / 50 (so they're comparable)
+    return descendantCount + Math.floor(textLength / 50);
+  });
+
+  const mean = sizes.reduce((a, b) => a + b, 0) / sizes.length;
+  if (mean === 0) return 0;
+
+  const variance = sizes.reduce((sum, s) => sum + (s - mean) ** 2, 0) / sizes.length;
+  const stdDev = Math.sqrt(variance);
+  const coefficientOfVariation = stdDev / mean;
+
+  // CV near 0 = identical sizes; CV near 1+ = wildly different
+  // Map CV → score: CV=0 → 1.0, CV=0.5 → 0.5, CV>=1.5 → 0
+  if (coefficientOfVariation >= 1.5) return 0;
+  return Math.max(0, 1 - coefficientOfVariation / 1.5);
+}
+
+/**
+ * Compute how repetitive the children's class names are.
+ *
+ * Strong signals:
+ *  - All children share the same outer class (e.g., all .dnd-section)
+ *  - All children share a class prefix (e.g., all .section_*)
+ *
+ * Returns a score between 0 and 1.
+ */
+function scoreClassRepetition(children: HTMLElement[]): number {
+  if (children.length < 2) return 0;
+
+  const classLists = children.map((c) => {
+    const cls = c.getAttribute("class") ?? "";
+    return cls
+      .split(/\s+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  });
+
+  // Score 1: how many children share at least one common class?
+  const allClasses = classLists.flat();
+  const classCounts = new Map<string, number>();
+  for (const c of allClasses) classCounts.set(c, (classCounts.get(c) ?? 0) + 1);
+
+  let mostCommonClassCount = 0;
+  for (const count of classCounts.values()) {
+    if (count > mostCommonClassCount) mostCommonClassCount = count;
+  }
+  const sharedClassRatio = mostCommonClassCount / children.length;
+
+  // Score 2: how many children share a class prefix? (e.g., section_hero, section_about)
+  const prefixCounts = new Map<string, number>();
+  for (const classes of classLists) {
+    const prefixes = new Set<string>();
+    for (const c of classes) {
+      const match = c.match(/^([a-zA-Z][a-zA-Z0-9]*[-_])/);
+      if (match) prefixes.add(match[1]);
+    }
+    for (const p of prefixes) prefixCounts.set(p, (prefixCounts.get(p) ?? 0) + 1);
+  }
+
+  let mostCommonPrefixCount = 0;
+  for (const count of prefixCounts.values()) {
+    if (count > mostCommonPrefixCount) mostCommonPrefixCount = count;
+  }
+  const sharedPrefixRatio = mostCommonPrefixCount / children.length;
+
+  // Score 3: tag uniformity (all <section>, all <div>)
+  const tags = children.map((c) => c.rawTagName?.toLowerCase() ?? "");
+  const tagCounts = new Map<string, number>();
+  for (const t of tags) tagCounts.set(t, (tagCounts.get(t) ?? 0) + 1);
+  let mostCommonTagCount = 0;
+  for (const count of tagCounts.values()) {
+    if (count > mostCommonTagCount) mostCommonTagCount = count;
+  }
+  const tagUniformity = mostCommonTagCount / children.length;
+
+  // Combine: a strong signal is shared class > 0.7, prefix > 0.7, or tag uniformity 1.0
+  // Take the max of these — we don't need ALL signals, any one is sufficient
+  return Math.max(sharedClassRatio, sharedPrefixRatio, tagUniformity * 0.6);
+}
+
+/**
+ * Compute what fraction of the page's text content is covered by these children.
+ *
+ * If the children together contain most of the page's text, this is likely the
+ * section level. If they cover only a sliver, we're probably looking at a
+ * sidebar or some other partial level.
+ *
+ * Returns a score between 0 and 1.
+ */
+function scoreContentCoverage(
+  children: HTMLElement[],
+  contentRoot: HTMLElement
+): number {
+  const totalTextLength = (contentRoot.text ?? "").length;
+  if (totalTextLength === 0) return 0;
+
+  let childrenTextLength = 0;
+  for (const c of children) {
+    childrenTextLength += (c.text ?? "").length;
+  }
+
+  const ratio = childrenTextLength / totalTextLength;
+  // Scale: 0% = 0, 50% = 0.5, 80%+ = 1.0
+  if (ratio >= 0.8) return 1.0;
+  return ratio / 0.8;
+}
+
+/**
+ * Score a level candidate by combining its signals.
+ *
+ * Weights chosen so that:
+ *  - Class repetition is strongest single signal (page builders are reliable)
+ *  - Child count and similarity confirm it's a real section level
+ *  - Content coverage prevents picking a sidebar-like level
+ */
+function scoreLevel(
+  parent: HTMLElement,
+  children: HTMLElement[],
+  contentRoot: HTMLElement,
+  depth: number
+): LevelCandidate {
+  const countScore = scoreChildCount(children.length);
+  const similarityScore = scoreStructuralSimilarity(children);
+  const classRepetitionScore = scoreClassRepetition(children);
+  const coverageScore = scoreContentCoverage(children, contentRoot);
+
+  // Weights: tuned to favor levels with consistent class/tag patterns and
+  // good coverage, while still working on pages without page-builder classes.
+  const weighted =
+    countScore * 0.25 +
+    similarityScore * 0.20 +
+    classRepetitionScore * 0.30 +
+    coverageScore * 0.25;
+
+  // Apply a depth penalty: shallower is generally preferred all else equal,
+  // because the section level shouldn't be deeply buried. But the penalty
+  // is small — a clearly better level deeper in the tree should still win.
+  const depthPenalty = Math.max(0, 1 - depth * 0.05);
+  const finalScore = weighted * depthPenalty;
+
+  return {
+    parent,
+    children,
+    depth,
+    score: finalScore,
+    signals: {
+      countScore,
+      similarityScore,
+      classRepetitionScore,
+      coverageScore,
+    },
+  };
+}
+
+/**
+ * Walk the DOM from the content root, evaluating every potential section level
+ * up to a max depth. Returns all candidates sorted by score, highest first.
+ */
+function findCandidateLevels(
+  contentRoot: HTMLElement,
+  maxDepth = 6
+): LevelCandidate[] {
+  const candidates: LevelCandidate[] = [];
+
+  function walk(elem: HTMLElement, depth: number) {
+    if (depth > maxDepth) return;
+    const children = meaningfulChildren(elem);
+    if (children.length >= 2) {
+      candidates.push(scoreLevel(elem, children, contentRoot, depth));
+    }
+    // Recurse into each child IF it has its own meaningful children
+    // We don't need to recurse into every descendant — only ones that could
+    // themselves be section parents. A reasonable heuristic: recurse into a
+    // child if it has 2+ meaningful children of its own.
+    for (const child of children) {
+      if (meaningfulChildren(child).length >= 2) {
+        walk(child, depth + 1);
+      }
+    }
+  }
+
+  walk(contentRoot, 0);
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
+}
+
+// ============================================================
+// Heading-anchored fallback (kept for pages without clear structure)
+// ============================================================
+
+function findHeadingFallbackSections(contentRoot: HTMLElement): HTMLElement[] {
+  const anchors: HTMLElement[] = [];
+  const all = [...contentRoot.querySelectorAll("h1"), ...contentRoot.querySelectorAll("h2")];
+  for (const h of all) {
+    if (isInsideChrome(h, contentRoot)) continue;
+    if ((h.text?.trim() ?? "").length === 0) continue;
+    anchors.push(h);
+  }
+
+  if (anchors.length === 0) return [];
+
+  // Build a synthetic wrapper per heading containing the heading + content
+  // until the next heading (skipping anything we can't safely include).
+  const sections: HTMLElement[] = [];
+  for (let i = 0; i < anchors.length; i++) {
+    const wrapper = parse('<section class="portage-heading-chunk"></section>')
+      .firstChild as HTMLElement;
+    wrapper.appendChild(anchors[i].clone());
+    sections.push(wrapper);
+  }
+  return sections;
+}
+
 function isInsideChrome(elem: HTMLElement, contentRoot: HTMLElement): boolean {
   let current: HTMLElement | null = elem.parentNode as HTMLElement | null;
   while (current && current !== contentRoot) {
     const tag = current.rawTagName?.toLowerCase();
     if (tag && CHROME_TAGS.has(tag)) return true;
-    // Also check role attribute
     const role = current.getAttribute("role")?.toLowerCase();
     if (role === "navigation" || role === "banner" || role === "contentinfo") return true;
     current = current.parentNode as HTMLElement | null;
@@ -172,255 +452,7 @@ function isInsideChrome(elem: HTMLElement, contentRoot: HTMLElement): boolean {
 }
 
 // ============================================================
-// Heading-anchored section detection (the new primary strategy)
-// ============================================================
-
-/**
- * Find all <h1> and <h2> elements that should anchor a section.
- * Filters out headings inside chrome (navigation menus, footers).
- */
-function findSectionAnchors(contentRoot: HTMLElement): HTMLElement[] {
-  const all: HTMLElement[] = [];
-  const h1s = contentRoot.querySelectorAll("h1");
-  const h2s = contentRoot.querySelectorAll("h2");
-  for (const h of [...h1s, ...h2s]) {
-    if (!isInsideChrome(h, contentRoot)) {
-      const text = h.text?.trim();
-      // Skip empty headings (yes, real pages have these — usually decorative)
-      if (text && text.length > 0) {
-        all.push(h);
-      }
-    }
-  }
-  // Sort by document order (their position in the rendered HTML)
-  all.sort((a, b) => documentOrder(a, b));
-  return all;
-}
-
-/**
- * Compare two elements by document order.
- * Walks the DOM to find which comes first.
- */
-function documentOrder(a: HTMLElement, b: HTMLElement): number {
-  // Build the path from each element to the root
-  const pathA = pathToRoot(a);
-  const pathB = pathToRoot(b);
-  // Walk down the common ancestor and compare child indices
-  let i = pathA.length - 1;
-  let j = pathB.length - 1;
-  while (i >= 0 && j >= 0 && pathA[i] === pathB[j]) {
-    i--;
-    j--;
-  }
-  if (i < 0) return -1; // a is ancestor of b
-  if (j < 0) return 1; // b is ancestor of a
-  // Different siblings under a common parent — compare their positions
-  const parent = pathA[i + 1];
-  if (!parent) return 0;
-  const children = parent.childNodes;
-  const indexA = children.indexOf(pathA[i]);
-  const indexB = children.indexOf(pathB[j]);
-  return indexA - indexB;
-}
-
-function pathToRoot(elem: HTMLElement): HTMLElement[] {
-  const path: HTMLElement[] = [];
-  let current: HTMLElement | null = elem;
-  while (current) {
-    path.push(current);
-    current = current.parentNode as HTMLElement | null;
-  }
-  return path;
-}
-
-/**
- * Given a heading anchor, find the section container that "owns" it.
- *
- * Walk up the DOM from the heading. The container is the first ancestor that
- * either:
- *  - Is a semantic <section> or <article>
- *  - Has a class that strongly suggests a section
- *  - Is a div whose siblings (at the same level) also contain headings of the
- *    same level (suggesting it's a sibling-level section wrapper)
- *
- * Caps at 8 levels of walking up to avoid runaway.
- */
-function findSectionContainer(heading: HTMLElement, contentRoot: HTMLElement): HTMLElement {
-  const SECTION_CLASS_PATTERNS = [
-    /\bsection\b/i,
-    /\bhero\b/i,
-    /\bdnd[-_]?section\b/i,
-    /\brow[-_]?fluid[-_]?wrapper\b/i,
-    /\bcontent[-_]?wrapper\b/i,
-    /\bblock\b/i,
-  ];
-  const SECTION_TAGS = new Set(["section", "article"]);
-
-  let current: HTMLElement | null = heading.parentNode as HTMLElement | null;
-  let depth = 0;
-  let bestCandidate: HTMLElement = heading;
-
-  while (current && current !== contentRoot && depth < 8) {
-    const tag = current.rawTagName?.toLowerCase();
-    if (tag && SECTION_TAGS.has(tag)) return current;
-
-    const className = current.getAttribute("class") ?? "";
-    for (const pattern of SECTION_CLASS_PATTERNS) {
-      if (pattern.test(className)) {
-        bestCandidate = current;
-        // Don't return immediately — keep walking; sometimes a more specific
-        // wrapper exists higher up. But cap our walk.
-        break;
-      }
-    }
-
-    current = current.parentNode as HTMLElement | null;
-    depth++;
-  }
-
-  return bestCandidate;
-}
-
-/**
- * Heading-anchored section detection.
- *
- * 1. Find all H1/H2 anchors in the content root, skipping chrome
- * 2. For each anchor, find its section container (walking up the DOM)
- * 3. Build sections by collecting content from each container, plus any content
- *    between containers in document order
- * 4. Capture pre-first-anchor content as the hero section if substantial
- */
-function detectSectionsByHeadings(contentRoot: HTMLElement): {
-  sections: HTMLElement[];
-  warnings: string[];
-} {
-  const warnings: string[] = [];
-  const anchors = findSectionAnchors(contentRoot);
-
-  if (anchors.length === 0) {
-    warnings.push("No H1 or H2 headings found in main content.");
-    return { sections: [], warnings };
-  }
-
-  // Determine each anchor's container
-  const sectionContainers: HTMLElement[] = [];
-  const seenContainers = new Set<HTMLElement>();
-
-  for (const anchor of anchors) {
-    const container = findSectionContainer(anchor, contentRoot);
-    if (!seenContainers.has(container)) {
-      sectionContainers.push(container);
-      seenContainers.add(container);
-    }
-  }
-
-  // If multiple anchors landed on the same container (the heading walking
-  // returned a too-broad parent), fall back to using the heading itself as
-  // the anchor and synthesize sections from heading-to-heading content.
-  if (sectionContainers.length < anchors.length / 2 && anchors.length > 1) {
-    warnings.push(
-      "Container detection collapsed multiple sections together; using heading-to-heading chunks instead."
-    );
-    return {
-      sections: chunkBetweenAnchors(anchors, contentRoot),
-      warnings,
-    };
-  }
-
-  return { sections: sectionContainers, warnings };
-}
-
-/**
- * Fallback: when the container walk groups too many sections together, build
- * synthetic sections by collecting siblings between adjacent heading anchors.
- *
- * This requires that the headings share a common ancestor where they're
- * siblings (or near-siblings). For each pair of adjacent anchors, find the
- * common ancestor and grab the children between them.
- */
-function chunkBetweenAnchors(
-  anchors: HTMLElement[],
-  contentRoot: HTMLElement
-): HTMLElement[] {
-  const sections: HTMLElement[] = [];
-
-  for (let i = 0; i < anchors.length; i++) {
-    const start = anchors[i];
-    const end = anchors[i + 1] ?? null;
-
-    // Build a synthetic wrapper containing the heading and everything that
-    // follows it in document order until the next heading (exclusive).
-    const wrapper = parse('<section class="portage-chunk"></section>')
-      .firstChild as HTMLElement;
-    wrapper.appendChild(start.clone());
-
-    // Collect all elements that come after `start` in document order but
-    // before `end`, scanning from start's parent and walking forward.
-    let current: HTMLElement | Node | null = nextInDocumentOrder(start);
-    while (current && current !== end) {
-      if (current.nodeType === NodeType.ELEMENT_NODE) {
-        const elem = current as HTMLElement;
-        // Don't recurse into chrome
-        if (!isInsideChrome(elem, contentRoot)) {
-          // Avoid grabbing ancestors of `end` — that would include content
-          // belonging to the next section
-          if (!end || !contains(elem, end)) {
-            // Only include leaf-ish content (paragraphs, lists, images, divs
-            // that don't contain headings)
-            if (!containsHeading(elem) && !isAncestorOfNextAnchor(elem, end)) {
-              wrapper.appendChild(elem.clone());
-            }
-          }
-        }
-      }
-      current = nextInDocumentOrder(current);
-    }
-
-    sections.push(wrapper);
-  }
-
-  return sections;
-}
-
-function contains(ancestor: HTMLElement, descendant: HTMLElement): boolean {
-  let current: HTMLElement | null = descendant.parentNode as HTMLElement | null;
-  while (current) {
-    if (current === ancestor) return true;
-    current = current.parentNode as HTMLElement | null;
-  }
-  return false;
-}
-
-function containsHeading(elem: HTMLElement): boolean {
-  if (/^h[12]$/i.test(elem.rawTagName ?? "")) return true;
-  return elem.querySelectorAll("h1, h2").length > 0;
-}
-
-function isAncestorOfNextAnchor(elem: HTMLElement, next: HTMLElement | null): boolean {
-  if (!next) return false;
-  return contains(elem, next);
-}
-
-function nextInDocumentOrder(node: Node | HTMLElement | null): HTMLElement | Node | null {
-  if (!node) return null;
-  const elem = node as HTMLElement;
-  // First child if any
-  if (elem.childNodes && elem.childNodes.length > 0) return elem.childNodes[0];
-  // Otherwise next sibling, walking up if needed
-  let current: HTMLElement | Node | null = node;
-  while (current) {
-    const parent = (current as HTMLElement).parentNode as HTMLElement | null;
-    if (!parent) return null;
-    const siblings = parent.childNodes;
-    const idx = siblings.indexOf(current as HTMLElement);
-    if (idx >= 0 && idx < siblings.length - 1) return siblings[idx + 1];
-    current = parent;
-  }
-  return null;
-}
-
-// ============================================================
-// Per-section content extraction (largely unchanged)
+// Per-section content extraction
 // ============================================================
 
 function extractTextWithBreaks(elem: HTMLElement): string {
@@ -441,7 +473,6 @@ function extractTextWithBreaks(elem: HTMLElement): string {
     const e = node as HTMLElement;
     const tag = e.rawTagName?.toLowerCase() ?? "";
     const isBlock = blockTags.has(tag);
-
     if (isBlock) parts.push("\n");
     for (const child of e.childNodes) walk(child, parts);
     if (isBlock) parts.push("\n");
@@ -505,7 +536,6 @@ function buildSectionContent(elem: HTMLElement): SectionContent {
   const headings = extractHeadings(elem);
   const images = extractImages(elem);
   const links = extractLinks(elem);
-
   let heading: string | undefined;
   for (const target of [1, 2, 3]) {
     const found = headings.find((h) => h.level === target);
@@ -514,7 +544,6 @@ function buildSectionContent(elem: HTMLElement): SectionContent {
       break;
     }
   }
-
   const wordCount = text.split(/\s+/).filter(Boolean).length;
   return { text, heading, headings, images, links, wordCount };
 }
@@ -541,7 +570,8 @@ function computeDomPath(elem: HTMLElement, root: HTMLElement): string {
 // Top-level
 // ============================================================
 
-const MIN_SECTION_WORDS = 3; // lowered from 5 — a hero with just a headline + short tagline counts
+const MIN_SECTION_WORDS = 3;
+const MIN_LEVEL_SCORE = 0.35; // below this, structural detection wasn't confident enough
 
 export function parseSourcePage(
   sourceUrl: string,
@@ -552,6 +582,7 @@ export function parseSourcePage(
     sections: [],
     sectionCount: 0,
     warnings: [],
+    detectionMethod: "none",
     parsedAt: new Date().toISOString(),
   };
 
@@ -573,18 +604,57 @@ export function parseSourcePage(
   result.pageDescription = extractPageDescription(root);
 
   const contentRoot = findContentRoot(root);
-  const { sections: candidates, warnings } = detectSectionsByHeadings(contentRoot);
-  result.warnings.push(...warnings);
 
-  if (candidates.length === 0) {
+  // Step 1: try structural detection
+  const candidates = findCandidateLevels(contentRoot);
+
+  let detectedSections: HTMLElement[] = [];
+  let method: "structural" | "heading-fallback" | "semantic-section" | "none" = "none";
+
+  if (candidates.length > 0 && candidates[0].score >= MIN_LEVEL_SCORE) {
+    const winner = candidates[0];
+    detectedSections = winner.children;
+    method = "structural";
     result.warnings.push(
-      "No sections detected. The page may have an unusual structure."
+      `Detected ${winner.children.length} sections at depth ${winner.depth} ` +
+      `(score ${winner.score.toFixed(2)}; class repetition ${winner.signals.classRepetitionScore.toFixed(2)}, ` +
+      `similarity ${winner.signals.similarityScore.toFixed(2)}, coverage ${winner.signals.coverageScore.toFixed(2)}).`
     );
-    return result;
+  } else {
+    // Step 2: structural detection didn't find a clear section level
+    // Try semantic <section> tags directly under content root
+    const semanticSections = contentRoot
+      .querySelectorAll("section")
+      .filter((s) => !isInsideChrome(s, contentRoot));
+    if (semanticSections.length >= 2) {
+      detectedSections = semanticSections;
+      method = "semantic-section";
+      result.warnings.push(
+        `Structural detection didn't find a clear section level; falling back to semantic <section> tags.`
+      );
+    } else {
+      // Step 3: heading-anchored fallback
+      const headingSections = findHeadingFallbackSections(contentRoot);
+      if (headingSections.length > 0) {
+        detectedSections = headingSections;
+        method = "heading-fallback";
+        result.warnings.push(
+          `Structural detection didn't find a clear section level; falling back to heading-anchored chunking. ` +
+          `Some sections may be broken at heading boundaries that don't match real section breaks.`
+        );
+      } else {
+        result.warnings.push(
+          "Couldn't detect any sections. The page may have an unusual structure."
+        );
+        return result;
+      }
+    }
   }
 
+  result.detectionMethod = method;
+
   let order = 0;
-  for (const candidate of candidates) {
+  for (const candidate of detectedSections) {
     const content = buildSectionContent(candidate);
     if (content.wordCount < MIN_SECTION_WORDS && content.images.length === 0) {
       continue;
@@ -597,6 +667,7 @@ export function parseSourcePage(
       content,
       domPath,
       approximateOrder: order,
+      detectionMethod: method as DetectedSection["detectionMethod"],
     });
     order += 1;
   }
