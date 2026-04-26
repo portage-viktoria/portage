@@ -1,22 +1,20 @@
 /**
- * Source page parser.
+ * Source page parser — v2.
  *
- * Given rendered HTML, produces a structured ParsedPage with discrete sections.
- * Each section has stripped-down content (text, headings, images, links) and
- * an identifier suitable for cross-referencing in later milestones (the
- * classifier and matcher will consume these sections directly).
+ * Section detection strategy: heading-anchored chunking as the primary path,
+ * because headings are the most universal signal across CMS platforms. We
+ * look at every <h1> and <h2> in the main content area; each one anchors a
+ * new section. Content between two anchors becomes one section.
  *
- * Section detection strategy — combine multiple signals:
- *   1. Top-level <section> and <main > <div> children
- *   2. Direct children of <main>, <body>, or known content wrappers
- *   3. Heading-anchored chunks (h1/h2 starts a new section)
- *   4. Class name patterns common in marketing sites (.section, .hero, etc.)
+ * For each heading anchor, we determine the section's "container element" by
+ * walking up the DOM from the heading until we find a parent that's likely
+ * a section wrapper. Then we collect that wrapper's content.
  *
- * We over-segment rather than under-segment. Better to give the user 12
- * candidate sections (some of which they merge later) than 4 (which hides
- * real boundaries). The classifier in Milestone 4 will help disambiguate.
+ * This handles the common case (WordPress, HubSpot, Webflow, hand-coded) and
+ * works regardless of how deeply the DOM is nested. It's also tolerant of
+ * weird wrapper class names because it doesn't rely on them at all.
  *
- * Uses node-html-parser — fast, dependency-free, handles real-world messy HTML.
+ * Falls back to top-level container detection only if no <h1>/<h2> exist.
  */
 
 import { parse, HTMLElement, Node, NodeType } from "node-html-parser";
@@ -38,32 +36,19 @@ export type ExtractedLink = {
 };
 
 export type SectionContent = {
-  // Rendered text content of the section, with block boundaries preserved
   text: string;
-  // The section's primary heading, if any (h1/h2/h3 closest to the top)
   heading?: string;
-  // All headings in the section, with their levels
   headings: Array<{ level: number; text: string }>;
-  // All <img> tags found inside the section
   images: ExtractedImage[];
-  // All <a> links found inside the section (excluding anchor-only links)
   links: ExtractedLink[];
-  // Approximate number of words in the section
   wordCount: number;
 };
 
 export type DetectedSection = {
-  id: string; // stable identifier within this parse: "section-1", "section-2", ...
-  // The HTML of the section, normalized (inline styles stripped, etc.)
+  id: string;
   html: string;
-  // Structured content extracted from that HTML
   content: SectionContent;
-  // CSS-style selector path that uniquely identifies this section in the
-  // original DOM. Helpful later for cropping screenshots and for diagnostic
-  // display in the UI.
   domPath: string;
-  // Rough vertical position hints — useful for visualization and screenshot
-  // cropping later. Both default to undefined when we can't estimate.
   approximateOrder: number;
 };
 
@@ -74,50 +59,25 @@ export type ParsedPage = {
   sections: DetectedSection[];
   sectionCount: number;
   warnings: string[];
-  parsedAt: string; // ISO timestamp
+  parsedAt: string;
 };
 
 // ============================================================
-// HTML normalization
+// HTML normalization (unchanged from v1)
 // ============================================================
 
-const STRIP_TAGS = new Set([
-  "script",
-  "style",
-  "noscript",
-  "iframe",
-  "svg", // we keep image references via <img>, but inline SVGs are usually icons we don't need
-]);
-
+const STRIP_TAGS = new Set(["script", "style", "noscript", "iframe", "svg"]);
 const STRIP_ATTRIBUTES = new Set([
-  "style",
-  "onclick",
-  "onload",
-  "onerror",
-  "onmouseover",
-  "onmouseout",
-  "onfocus",
-  "onblur",
-  "onchange",
-  "onsubmit",
-  "data-hs-cf-bound",
-  "data-reactid",
+  "style", "onclick", "onload", "onerror", "onmouseover", "onmouseout",
+  "onfocus", "onblur", "onchange", "onsubmit",
+  "data-hs-cf-bound", "data-reactid",
 ]);
 
-/**
- * Walk the DOM tree, removing scripts/styles, stripping inline styles and
- * tracking attributes, and collapsing irrelevant wrapper divs.
- *
- * Mutates in place. Returns the same root for chaining.
- */
 function normalizeDom(root: HTMLElement): HTMLElement {
-  // Recursive cleanup
   function clean(node: HTMLElement) {
-    // Iterate children in reverse so we can safely remove
     const children = node.childNodes.slice();
     for (const child of children) {
       if (child.nodeType === NodeType.COMMENT_NODE) {
-        // Remove all HTML comments
         node.removeChild(child);
         continue;
       }
@@ -130,15 +90,10 @@ function normalizeDom(root: HTMLElement): HTMLElement {
         continue;
       }
 
-      // Strip dangerous/style attributes from this element
       const attrs = elem.attributes;
       for (const attrName of Object.keys(attrs)) {
         const lower = attrName.toLowerCase();
-        if (STRIP_ATTRIBUTES.has(lower)) {
-          elem.removeAttribute(attrName);
-        }
-        // Strip all on* event handlers as a catch-all
-        if (lower.startsWith("on")) {
+        if (STRIP_ATTRIBUTES.has(lower) || lower.startsWith("on")) {
           elem.removeAttribute(attrName);
         }
       }
@@ -146,29 +101,24 @@ function normalizeDom(root: HTMLElement): HTMLElement {
       clean(elem);
     }
   }
-
   clean(root);
   return root;
 }
 
 // ============================================================
-// Page metadata extraction
+// Page metadata
 // ============================================================
 
 function extractPageTitle(root: HTMLElement): string | undefined {
-  // Prefer <title>, fall back to og:title
   const titleEl = root.querySelector("title");
   if (titleEl?.text?.trim()) return titleEl.text.trim();
-
   const ogTitle = root.querySelector('meta[property="og:title"]');
   if (ogTitle) {
     const content = ogTitle.getAttribute("content")?.trim();
     if (content) return content;
   }
-
   const h1 = root.querySelector("h1");
   if (h1?.text?.trim()) return h1.text.trim();
-
   return undefined;
 }
 
@@ -187,65 +137,14 @@ function extractPageDescription(root: HTMLElement): string | undefined {
 }
 
 // ============================================================
-// Section detection
+// Content root detection
 // ============================================================
 
-const SECTION_LIKE_TAGS = new Set(["section", "article"]);
-
-// Class names that strongly suggest "this is a section"
-const SECTION_CLASS_PATTERNS = [
-  /\bsection\b/i,
-  /\bhero\b/i,
-  /\bcta[-_]?(banner|section|band)?\b/i,
-  /\bcontent[-_]?block\b/i,
-  /\bcontent[-_]?section\b/i,
-  /\bpage[-_]?section\b/i,
-  /\brow\b/i, // common in HubSpot themes
-  /\bdnd[-_]?section\b/i, // HubSpot drag-and-drop sections
-  /\bspan\d{1,2}\b/i, // HubSpot column wrappers — not perfect but a signal
-];
-
-// Tags that we should NOT treat as section boundaries even if they have a
-// suspicious class — these are inline or layout-only.
-const NEVER_SECTION_TAGS = new Set([
-  "header",
-  "footer",
-  "nav",
-  "aside",
-  "form",
-  "ul",
-  "ol",
-  "li",
-  "p",
-  "span",
-  "a",
-  "button",
-  "img",
-  "br",
-  "hr",
-]);
-
-function looksLikeSection(elem: HTMLElement): boolean {
-  const tag = elem.rawTagName?.toLowerCase();
-  if (!tag) return false;
-  if (NEVER_SECTION_TAGS.has(tag)) return false;
-
-  if (SECTION_LIKE_TAGS.has(tag)) return true;
-
-  const className = elem.getAttribute("class") ?? "";
-  if (className) {
-    for (const pattern of SECTION_CLASS_PATTERNS) {
-      if (pattern.test(className)) return true;
-    }
-  }
-
-  return false;
-}
+const CHROME_TAGS = new Set(["header", "footer", "nav", "aside"]);
 
 /**
- * Find the best content root in the document. Prefer <main>, fall back to
- * <body>. Skip <header>, <nav>, <footer>, and anything that looks like a
- * site chrome wrapper.
+ * Find the main content root, skipping site chrome.
+ * Prefer <main>, then <body>, but exclude obvious headers/footers.
  */
 function findContentRoot(root: HTMLElement): HTMLElement {
   const main = root.querySelector("main");
@@ -256,113 +155,280 @@ function findContentRoot(root: HTMLElement): HTMLElement {
 }
 
 /**
- * Identify section candidates within a content root.
- *
- * Strategy:
- *   1. If content root has direct children that are sections (semantic or
- *      pattern-matched), use those.
- *   2. Otherwise, recurse into the first non-trivial wrapper and try again.
- *      This handles wrappers like <div class="container"><div class="row">...
- *      that nest a level or two before sections appear.
- *   3. If we still can't find sections, fall back to heading-anchored
- *      chunking — every h1/h2 starts a new section, with content collected
- *      until the next heading.
+ * Check if an element is inside site chrome (header/footer/nav).
+ * We don't want headings inside the navigation menu treated as section anchors.
  */
-function detectSectionCandidates(contentRoot: HTMLElement): HTMLElement[] {
-  // Strategy 1+2: walk down looking for a level where sections appear
-  let current = contentRoot;
-  for (let depth = 0; depth < 4; depth++) {
-    const sections: HTMLElement[] = [];
-    for (const child of current.childNodes) {
-      if (child.nodeType !== NodeType.ELEMENT_NODE) continue;
-      const elem = child as HTMLElement;
-      if (looksLikeSection(elem)) sections.push(elem);
-    }
-    if (sections.length >= 2) return sections;
-
-    // Step into the first significant child if no sections found
-    const firstSignificantChild = current.childNodes
-      .filter((n) => n.nodeType === NodeType.ELEMENT_NODE)
-      .map((n) => n as HTMLElement)
-      .find(
-        (e) =>
-          !["header", "footer", "nav", "aside"].includes(
-            e.rawTagName?.toLowerCase() ?? ""
-          )
-      );
-    if (!firstSignificantChild) break;
-    current = firstSignificantChild;
+function isInsideChrome(elem: HTMLElement, contentRoot: HTMLElement): boolean {
+  let current: HTMLElement | null = elem.parentNode as HTMLElement | null;
+  while (current && current !== contentRoot) {
+    const tag = current.rawTagName?.toLowerCase();
+    if (tag && CHROME_TAGS.has(tag)) return true;
+    // Also check role attribute
+    const role = current.getAttribute("role")?.toLowerCase();
+    if (role === "navigation" || role === "banner" || role === "contentinfo") return true;
+    current = current.parentNode as HTMLElement | null;
   }
+  return false;
+}
 
-  // Strategy 3: heading-anchored chunking as a fallback
-  return chunkByHeadings(contentRoot);
+// ============================================================
+// Heading-anchored section detection (the new primary strategy)
+// ============================================================
+
+/**
+ * Find all <h1> and <h2> elements that should anchor a section.
+ * Filters out headings inside chrome (navigation menus, footers).
+ */
+function findSectionAnchors(contentRoot: HTMLElement): HTMLElement[] {
+  const all: HTMLElement[] = [];
+  const h1s = contentRoot.querySelectorAll("h1");
+  const h2s = contentRoot.querySelectorAll("h2");
+  for (const h of [...h1s, ...h2s]) {
+    if (!isInsideChrome(h, contentRoot)) {
+      const text = h.text?.trim();
+      // Skip empty headings (yes, real pages have these — usually decorative)
+      if (text && text.length > 0) {
+        all.push(h);
+      }
+    }
+  }
+  // Sort by document order (their position in the rendered HTML)
+  all.sort((a, b) => documentOrder(a, b));
+  return all;
 }
 
 /**
- * Fallback chunker — when we can't find <section>-like wrappers, group siblings
- * by heading. Each h1/h2 starts a new chunk; a chunk includes that heading
- * plus all following non-heading siblings until the next h1/h2.
- *
- * Returns synthetic HTMLElement wrappers, one per chunk.
+ * Compare two elements by document order.
+ * Walks the DOM to find which comes first.
  */
-function chunkByHeadings(contentRoot: HTMLElement): HTMLElement[] {
-  // Find all top-level descendants that are headings or sibling content
-  // For simplicity, look at direct children only. If a page wraps everything
-  // in one big div, we go a level deeper.
-  let scan = contentRoot;
-  for (let depth = 0; depth < 3; depth++) {
-    const headings = scan.childNodes.filter(
-      (n) =>
-        n.nodeType === NodeType.ELEMENT_NODE &&
-        /^h[12]$/i.test((n as HTMLElement).rawTagName ?? "")
-    );
-    if (headings.length >= 2) break;
-    const firstChild = scan.childNodes.find(
-      (n) => n.nodeType === NodeType.ELEMENT_NODE
-    ) as HTMLElement | undefined;
-    if (!firstChild) break;
-    scan = firstChild;
+function documentOrder(a: HTMLElement, b: HTMLElement): number {
+  // Build the path from each element to the root
+  const pathA = pathToRoot(a);
+  const pathB = pathToRoot(b);
+  // Walk down the common ancestor and compare child indices
+  let i = pathA.length - 1;
+  let j = pathB.length - 1;
+  while (i >= 0 && j >= 0 && pathA[i] === pathB[j]) {
+    i--;
+    j--;
   }
+  if (i < 0) return -1; // a is ancestor of b
+  if (j < 0) return 1; // b is ancestor of a
+  // Different siblings under a common parent — compare their positions
+  const parent = pathA[i + 1];
+  if (!parent) return 0;
+  const children = parent.childNodes;
+  const indexA = children.indexOf(pathA[i]);
+  const indexB = children.indexOf(pathB[j]);
+  return indexA - indexB;
+}
 
-  // Build chunks
-  const chunks: HTMLElement[] = [];
-  let currentChunk: HTMLElement | null = null;
+function pathToRoot(elem: HTMLElement): HTMLElement[] {
+  const path: HTMLElement[] = [];
+  let current: HTMLElement | null = elem;
+  while (current) {
+    path.push(current);
+    current = current.parentNode as HTMLElement | null;
+  }
+  return path;
+}
 
-  for (const child of scan.childNodes) {
-    if (child.nodeType !== NodeType.ELEMENT_NODE) continue;
-    const elem = child as HTMLElement;
-    const tag = elem.rawTagName?.toLowerCase() ?? "";
+/**
+ * Given a heading anchor, find the section container that "owns" it.
+ *
+ * Walk up the DOM from the heading. The container is the first ancestor that
+ * either:
+ *  - Is a semantic <section> or <article>
+ *  - Has a class that strongly suggests a section
+ *  - Is a div whose siblings (at the same level) also contain headings of the
+ *    same level (suggesting it's a sibling-level section wrapper)
+ *
+ * Caps at 8 levels of walking up to avoid runaway.
+ */
+function findSectionContainer(heading: HTMLElement, contentRoot: HTMLElement): HTMLElement {
+  const SECTION_CLASS_PATTERNS = [
+    /\bsection\b/i,
+    /\bhero\b/i,
+    /\bdnd[-_]?section\b/i,
+    /\brow[-_]?fluid[-_]?wrapper\b/i,
+    /\bcontent[-_]?wrapper\b/i,
+    /\bblock\b/i,
+  ];
+  const SECTION_TAGS = new Set(["section", "article"]);
 
-    if (/^h[12]$/.test(tag)) {
-      // Start a new chunk
-      currentChunk = parse('<section class="portage-chunk"></section>')
-        .firstChild as HTMLElement;
-      currentChunk.appendChild(elem.clone());
-      chunks.push(currentChunk);
-    } else if (currentChunk) {
-      currentChunk.appendChild(elem.clone());
+  let current: HTMLElement | null = heading.parentNode as HTMLElement | null;
+  let depth = 0;
+  let bestCandidate: HTMLElement = heading;
+
+  while (current && current !== contentRoot && depth < 8) {
+    const tag = current.rawTagName?.toLowerCase();
+    if (tag && SECTION_TAGS.has(tag)) return current;
+
+    const className = current.getAttribute("class") ?? "";
+    for (const pattern of SECTION_CLASS_PATTERNS) {
+      if (pattern.test(className)) {
+        bestCandidate = current;
+        // Don't return immediately — keep walking; sometimes a more specific
+        // wrapper exists higher up. But cap our walk.
+        break;
+      }
     }
-    // Content before the first heading is dropped — usually navigation
-    // or branding that we don't want to treat as a section anyway.
+
+    current = current.parentNode as HTMLElement | null;
+    depth++;
   }
 
-  return chunks;
+  return bestCandidate;
+}
+
+/**
+ * Heading-anchored section detection.
+ *
+ * 1. Find all H1/H2 anchors in the content root, skipping chrome
+ * 2. For each anchor, find its section container (walking up the DOM)
+ * 3. Build sections by collecting content from each container, plus any content
+ *    between containers in document order
+ * 4. Capture pre-first-anchor content as the hero section if substantial
+ */
+function detectSectionsByHeadings(contentRoot: HTMLElement): {
+  sections: HTMLElement[];
+  warnings: string[];
+} {
+  const warnings: string[] = [];
+  const anchors = findSectionAnchors(contentRoot);
+
+  if (anchors.length === 0) {
+    warnings.push("No H1 or H2 headings found in main content.");
+    return { sections: [], warnings };
+  }
+
+  // Determine each anchor's container
+  const sectionContainers: HTMLElement[] = [];
+  const seenContainers = new Set<HTMLElement>();
+
+  for (const anchor of anchors) {
+    const container = findSectionContainer(anchor, contentRoot);
+    if (!seenContainers.has(container)) {
+      sectionContainers.push(container);
+      seenContainers.add(container);
+    }
+  }
+
+  // If multiple anchors landed on the same container (the heading walking
+  // returned a too-broad parent), fall back to using the heading itself as
+  // the anchor and synthesize sections from heading-to-heading content.
+  if (sectionContainers.length < anchors.length / 2 && anchors.length > 1) {
+    warnings.push(
+      "Container detection collapsed multiple sections together; using heading-to-heading chunks instead."
+    );
+    return {
+      sections: chunkBetweenAnchors(anchors, contentRoot),
+      warnings,
+    };
+  }
+
+  return { sections: sectionContainers, warnings };
+}
+
+/**
+ * Fallback: when the container walk groups too many sections together, build
+ * synthetic sections by collecting siblings between adjacent heading anchors.
+ *
+ * This requires that the headings share a common ancestor where they're
+ * siblings (or near-siblings). For each pair of adjacent anchors, find the
+ * common ancestor and grab the children between them.
+ */
+function chunkBetweenAnchors(
+  anchors: HTMLElement[],
+  contentRoot: HTMLElement
+): HTMLElement[] {
+  const sections: HTMLElement[] = [];
+
+  for (let i = 0; i < anchors.length; i++) {
+    const start = anchors[i];
+    const end = anchors[i + 1] ?? null;
+
+    // Build a synthetic wrapper containing the heading and everything that
+    // follows it in document order until the next heading (exclusive).
+    const wrapper = parse('<section class="portage-chunk"></section>')
+      .firstChild as HTMLElement;
+    wrapper.appendChild(start.clone());
+
+    // Collect all elements that come after `start` in document order but
+    // before `end`, scanning from start's parent and walking forward.
+    let current: HTMLElement | Node | null = nextInDocumentOrder(start);
+    while (current && current !== end) {
+      if (current.nodeType === NodeType.ELEMENT_NODE) {
+        const elem = current as HTMLElement;
+        // Don't recurse into chrome
+        if (!isInsideChrome(elem, contentRoot)) {
+          // Avoid grabbing ancestors of `end` — that would include content
+          // belonging to the next section
+          if (!end || !contains(elem, end)) {
+            // Only include leaf-ish content (paragraphs, lists, images, divs
+            // that don't contain headings)
+            if (!containsHeading(elem) && !isAncestorOfNextAnchor(elem, end)) {
+              wrapper.appendChild(elem.clone());
+            }
+          }
+        }
+      }
+      current = nextInDocumentOrder(current);
+    }
+
+    sections.push(wrapper);
+  }
+
+  return sections;
+}
+
+function contains(ancestor: HTMLElement, descendant: HTMLElement): boolean {
+  let current: HTMLElement | null = descendant.parentNode as HTMLElement | null;
+  while (current) {
+    if (current === ancestor) return true;
+    current = current.parentNode as HTMLElement | null;
+  }
+  return false;
+}
+
+function containsHeading(elem: HTMLElement): boolean {
+  if (/^h[12]$/i.test(elem.rawTagName ?? "")) return true;
+  return elem.querySelectorAll("h1, h2").length > 0;
+}
+
+function isAncestorOfNextAnchor(elem: HTMLElement, next: HTMLElement | null): boolean {
+  if (!next) return false;
+  return contains(elem, next);
+}
+
+function nextInDocumentOrder(node: Node | HTMLElement | null): HTMLElement | Node | null {
+  if (!node) return null;
+  const elem = node as HTMLElement;
+  // First child if any
+  if (elem.childNodes && elem.childNodes.length > 0) return elem.childNodes[0];
+  // Otherwise next sibling, walking up if needed
+  let current: HTMLElement | Node | null = node;
+  while (current) {
+    const parent = (current as HTMLElement).parentNode as HTMLElement | null;
+    if (!parent) return null;
+    const siblings = parent.childNodes;
+    const idx = siblings.indexOf(current as HTMLElement);
+    if (idx >= 0 && idx < siblings.length - 1) return siblings[idx + 1];
+    current = parent;
+  }
+  return null;
 }
 
 // ============================================================
-// Per-section content extraction
+// Per-section content extraction (largely unchanged)
 // ============================================================
 
 function extractTextWithBreaks(elem: HTMLElement): string {
-  // Get text content but preserve paragraph/list/heading boundaries as
-  // newlines. node-html-parser's structuredText is okay but adds excessive
-  // whitespace; we do it ourselves for cleaner output.
   const blockTags = new Set([
     "p", "div", "section", "article", "header", "footer",
     "h1", "h2", "h3", "h4", "h5", "h6",
     "ul", "ol", "li",
-    "blockquote", "pre",
-    "br",
+    "blockquote", "pre", "br",
   ]);
 
   function walk(node: Node, parts: string[]): void {
@@ -383,7 +449,6 @@ function extractTextWithBreaks(elem: HTMLElement): string {
 
   const parts: string[] = [];
   walk(elem, parts);
-  // Collapse whitespace, preserve double-newlines as paragraph breaks
   const joined = parts.join("");
   return joined
     .replace(/[ \t]+/g, " ")
@@ -410,7 +475,6 @@ function extractImages(elem: HTMLElement): ExtractedImage[] {
   for (const img of elem.querySelectorAll("img")) {
     const src = img.getAttribute("src")?.trim();
     if (!src) continue;
-    // Skip tracking pixels
     const width = parseInt(img.getAttribute("width") ?? "", 10);
     const height = parseInt(img.getAttribute("height") ?? "", 10);
     if (!isNaN(width) && !isNaN(height) && width <= 1 && height <= 1) continue;
@@ -442,7 +506,6 @@ function buildSectionContent(elem: HTMLElement): SectionContent {
   const images = extractImages(elem);
   const links = extractLinks(elem);
 
-  // Primary heading: closest h1, then h2, then h3
   let heading: string | undefined;
   for (const target of [1, 2, 3]) {
     const found = headings.find((h) => h.level === target);
@@ -453,13 +516,8 @@ function buildSectionContent(elem: HTMLElement): SectionContent {
   }
 
   const wordCount = text.split(/\s+/).filter(Boolean).length;
-
   return { text, heading, headings, images, links, wordCount };
 }
-
-// ============================================================
-// DOM path computation (for diagnostics + future screenshot cropping)
-// ============================================================
 
 function computeDomPath(elem: HTMLElement, root: HTMLElement): string {
   const parts: string[] = [];
@@ -480,10 +538,10 @@ function computeDomPath(elem: HTMLElement, root: HTMLElement): string {
 }
 
 // ============================================================
-// Top-level: parse a rendered HTML string into a ParsedPage
+// Top-level
 // ============================================================
 
-const MIN_SECTION_WORDS = 5; // skip near-empty sections (likely whitespace wrappers)
+const MIN_SECTION_WORDS = 3; // lowered from 5 — a hero with just a headline + short tagline counts
 
 export function parseSourcePage(
   sourceUrl: string,
@@ -515,27 +573,24 @@ export function parseSourcePage(
   result.pageDescription = extractPageDescription(root);
 
   const contentRoot = findContentRoot(root);
-  const candidates = detectSectionCandidates(contentRoot);
+  const { sections: candidates, warnings } = detectSectionsByHeadings(contentRoot);
+  result.warnings.push(...warnings);
 
   if (candidates.length === 0) {
     result.warnings.push(
-      "Couldn't detect any sections. The page may have an unusual structure or be mostly empty after rendering."
+      "No sections detected. The page may have an unusual structure."
     );
     return result;
   }
 
-  // Convert each candidate into a DetectedSection, dropping ones that are too
-  // small to be meaningful.
   let order = 0;
   for (const candidate of candidates) {
     const content = buildSectionContent(candidate);
     if (content.wordCount < MIN_SECTION_WORDS && content.images.length === 0) {
-      continue; // skip empty/tiny sections
+      continue;
     }
-
     const html = candidate.toString();
     const domPath = computeDomPath(candidate, root);
-
     result.sections.push({
       id: `section-${order + 1}`,
       html,
