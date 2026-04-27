@@ -1,12 +1,12 @@
 /**
- * HubSpot publishing helpers — v2.
+ * HubSpot publishing helpers — v3.
  *
- * Fixed layoutSections shape: rows are arrays of objects keyed by column
- * index ("0", "1", etc.), not arrays of column arrays. Section name is
- * "dnd_area" (the standard drag-and-drop area name in HubSpot themes).
+ * Adds templateName parameter to createHubSpotPage so callers can specify
+ * which template the page should use. Defaults to migration.html convention.
  *
- * Reference: HubSpot's documented example payload at
- *   https://developers.hubspot.com/docs/api-reference/cms-pages-v3/guide
+ * The template at <theme>/templates/<templateName> must contain a
+ * {% dnd_area "dnd_area" %}{% end_dnd_area %} block — that's the slot our
+ * layoutSections payload populates.
  */
 
 import crypto from "crypto";
@@ -211,53 +211,7 @@ function buildModuleParams(
 }
 
 // ============================================================
-// Build the layoutSections payload — CORRECTED SHAPE
-//
-// HubSpot's drag-and-drop area expects this shape:
-//
-//   layoutSections: {
-//     dnd_area: {
-//       name: "dnd_area",
-//       type: "section",
-//       label: "Main section",
-//       cells: [],
-//       params: {},
-//       rowMetaData: [...one entry per row...],
-//       rows: [
-//         { "0": <column_object_for_row_0> },
-//         { "0": <column_object_for_row_1> },
-//         ...
-//       ]
-//     }
-//   }
-//
-// Each <column_object> contains:
-//   {
-//     name: "dnd_area-column-N",
-//     type: "cell",
-//     params: { css_class: "dnd-column" },
-//     cells: [],
-//     rowMetaData: [{ cssClass: "dnd-row" }],
-//     rows: [
-//       { "0": <widget_wrapper_for_module> }
-//     ]
-//   }
-//
-// Each <widget_wrapper> is an object containing the widget definition:
-//   {
-//     name: "widget_name",
-//     type: "cell",
-//     cells: [
-//       {
-//         name: "widget_name",
-//         type: "custom_widget",
-//         widget_name: "widget_name",
-//         widget_type: "module",
-//         module_id: "<theme_path>/modules/<name>",
-//         params: { ...module field values... }
-//       }
-//     ]
-//   }
+// Build layoutSections — uses dnd_area as the section name
 // ============================================================
 
 type LayoutPayload = {
@@ -271,7 +225,6 @@ function buildLayoutSections(
 ): LayoutPayload {
   const sectionById = new Map(sections.map((s) => [s.id, s]));
 
-  // Build one row per matched section
   const rows: Array<Record<string, unknown>> = [];
   const rowMetaData: Array<Record<string, unknown>> = [];
 
@@ -283,7 +236,6 @@ function buildLayoutSections(
     const widgetName = `widget_${i + 1}`;
     const columnName = `dnd_area-column-${i + 1}`;
 
-    // Inner row: a column containing one widget
     const columnObject = {
       name: columnName,
       type: "cell",
@@ -337,6 +289,7 @@ export type CreatePageArgs = {
   pageSlug: string;
   metaDescription?: string;
   themePath: string;
+  templateName: string;          // e.g. "migration.html"
   sections: ParsedSection[];
   matches: SectionMatch[];
   imageUrlMap: Map<string, string>;
@@ -357,7 +310,7 @@ export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePag
     metaDescription: args.metaDescription ?? "",
     state: "DRAFT",
     layoutSections,
-    templatePath: `${args.themePath}/templates/page.html`,
+    templatePath: `${args.themePath}/templates/${args.templateName}`,
   };
 
   if (args.contentStagingState === "STAGING") {

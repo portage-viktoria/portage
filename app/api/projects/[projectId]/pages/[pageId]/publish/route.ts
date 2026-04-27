@@ -1,20 +1,13 @@
 /**
- * Publish endpoint.
+ * Publish endpoint — v2.
  *
- * POST /api/projects/[projectId]/pages/[pageId]/publish
- * Body: {
- *   destination: "STAGING" | "DRAFT",
- *   pageTitle?: string,    // override; defaults to parsed page_title
- *   pageSlug?: string,     // override; defaults to derived from source URL
- *   metaDescription?: string,
- * }
+ * Adds template validation: before creating the HubSpot page, verify that
+ * the project's configured template (default migration.html) actually exists
+ * in the theme's /templates folder. If not, return a clear setup-issue error
+ * rather than the cryptic "template not found" error from HubSpot.
  *
- * Flow:
- *   1. Load page (must be in 'matched' state)
- *   2. If destination=STAGING, verify tier supports it
- *   3. Upload images to File Manager
- *   4. Create the HubSpot page
- *   5. Store hubspot_page_id + url, status->published
+ * The template is configured per-project via the projects.template_name
+ * column. Default is 'migration.html', set via SQL migration 005.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -28,6 +21,8 @@ import {
   SectionMatch,
 } from "@/lib/hubspot-publish";
 import { logAudit } from "@/lib/audit";
+
+const HUBSPOT_API_BASE = "https://api.hubapi.com";
 
 function deriveSlugFromUrl(sourceUrl: string): string {
   try {
@@ -45,6 +40,40 @@ function deriveDomainFromUrl(sourceUrl: string): string {
     return new URL(sourceUrl).hostname.replace(/[^a-z0-9.-]/gi, "");
   } catch {
     return "unknown";
+  }
+}
+
+/**
+ * Verify the configured template actually exists in the theme.
+ * Returns null if found, or an error message string if not.
+ */
+async function validateTemplateExists(
+  accessToken: string,
+  themePath: string,
+  templateName: string
+): Promise<string | null> {
+  const fullPath = `${themePath}/templates/${templateName}`;
+  const encodedPath = fullPath.split("/").map(encodeURIComponent).join("/");
+  const url = `${HUBSPOT_API_BASE}/cms/v3/source-code/published/metadata/${encodedPath}`;
+
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        Accept: "application/json",
+      },
+    });
+    if (res.ok) return null;
+    if (res.status === 404) {
+      return (
+        `Your theme is missing ${fullPath}. ` +
+        `Create a drag-and-drop template at this path before publishing — ` +
+        `see the Portage setup docs for the exact template contents.`
+      );
+    }
+    return `Couldn't verify template (${res.status}). Try again in a moment.`;
+  } catch (err) {
+    return `Network error checking template: ${(err as Error).message}`;
   }
 }
 
@@ -91,12 +120,14 @@ export async function POST(
 
   const { data: project, error: projectError } = await supabase
     .from("projects")
-    .select("hub_id, theme_path")
+    .select("hub_id, theme_path, template_name")
     .eq("id", projectId)
     .maybeSingle();
   if (projectError || !project) {
     return NextResponse.json({ ok: false, error: "Project not found" }, { status: 404 });
   }
+
+  const templateName = project.template_name || "migration.html";
 
   let accessToken: string;
   try {
@@ -106,6 +137,20 @@ export async function POST(
       { ok: false, error: "Portal not connected" },
       { status: 404 }
     );
+  }
+
+  // Validate template before doing any expensive work
+  const templateError = await validateTemplateExists(
+    accessToken,
+    project.theme_path,
+    templateName
+  );
+  if (templateError) {
+    await supabase
+      .from("migration_pages")
+      .update({ status: "error", status_message: templateError })
+      .eq("id", pageId);
+    return NextResponse.json({ ok: false, error: templateError }, { status: 400 });
   }
 
   // Tier check if user picked staging
@@ -123,7 +168,6 @@ export async function POST(
     }
   }
 
-  // Mark as publishing
   await supabase
     .from("migration_pages")
     .update({ status: "publishing", status_message: null })
@@ -141,14 +185,9 @@ export async function POST(
   const metaDescription =
     body.metaDescription?.trim() || page.page_description || "";
 
-  // Upload images
   let imageUrlMap: Map<string, string>;
   try {
-    imageUrlMap = await uploadImagesToFileManager(
-      accessToken,
-      sections,
-      sourceDomain
-    );
+    imageUrlMap = await uploadImagesToFileManager(accessToken, sections, sourceDomain);
   } catch (err) {
     const msg = `Image upload failed: ${(err as Error).message}`;
     await supabase
@@ -158,13 +197,13 @@ export async function POST(
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
 
-  // Create page
   const result = await createHubSpotPage({
     accessToken,
     pageTitle,
     pageSlug,
     metaDescription,
     themePath: project.theme_path,
+    templateName,
     sections,
     matches,
     imageUrlMap,
@@ -179,7 +218,6 @@ export async function POST(
     return NextResponse.json({ ok: false, error: result.error }, { status: 502 });
   }
 
-  // Save success
   const { data: updated } = await supabase
     .from("migration_pages")
     .update({

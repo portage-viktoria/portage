@@ -1,9 +1,9 @@
 /**
- * Single project view.
+ * Single project view — with delete action on page rows.
  *
- * Shows project header (name, theme, portal) and a list of pages with their
- * statuses, titles, and URLs. "Add page" lets the user paste a URL — the
- * server parses it inline and the row updates with the result.
+ * Each page row now has a small overflow menu with a Delete option. Delete
+ * removes the page from Portage only — any published HubSpot page is left
+ * untouched and survives the deletion.
  */
 
 "use client";
@@ -12,7 +12,7 @@ import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
-  Plus, ArrowRight, ArrowLeft, Loader2, AlertCircle, ExternalLink, X,
+  Plus, ArrowRight, ArrowLeft, Loader2, AlertCircle, X, Trash2, ExternalLink,
 } from "lucide-react";
 
 type Project = {
@@ -32,6 +32,7 @@ type Page = {
   status_message: string | null;
   section_count: number;
   hubspot_page_url: string | null;
+  hubspot_page_id: string | null;
   updated_at: string;
 };
 
@@ -46,6 +47,7 @@ export default function ProjectPage() {
 
   const [state, setState] = useState<LoadState>({ status: "loading" });
   const [showAdd, setShowAdd] = useState(false);
+  const [pageToDelete, setPageToDelete] = useState<Page | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -71,8 +73,7 @@ export default function ProjectPage() {
 
         {state.status === "loading" && (
           <div className="flex items-center gap-2 text-sm" style={{ color: "#8B8478" }}>
-            <Loader2 className="w-4 h-4 animate-spin" />
-            Loading…
+            <Loader2 className="w-4 h-4 animate-spin" /> Loading…
           </div>
         )}
 
@@ -132,9 +133,23 @@ export default function ProjectPage() {
             {state.pages.length > 0 && (
               <div className="space-y-2">
                 {state.pages.map((p) => (
-                  <PageRow key={p.id} projectId={projectId} page={p} />
+                  <PageRow
+                    key={p.id}
+                    projectId={projectId}
+                    page={p}
+                    onDeleteClick={() => setPageToDelete(p)}
+                  />
                 ))}
               </div>
+            )}
+
+            {pageToDelete && (
+              <DeleteConfirmDialog
+                page={pageToDelete}
+                projectId={projectId}
+                onClose={() => setPageToDelete(null)}
+                onDeleted={() => { setPageToDelete(null); load(); }}
+              />
             )}
           </>
         )}
@@ -143,49 +158,92 @@ export default function ProjectPage() {
   );
 }
 
-function PageRow({ projectId, page }: { projectId: string; page: Page }) {
-  const title = page.page_title ?? new URL(page.source_url).pathname;
+// ============================================================
+// Page row with delete action
+// ============================================================
+
+function PageRow({
+  projectId, page, onDeleteClick,
+}: {
+  projectId: string;
+  page: Page;
+  onDeleteClick: () => void;
+}) {
+  const title = page.page_title ?? safePathname(page.source_url);
 
   return (
-    <Link
-      href={`/projects/${projectId}/pages/${page.id}`}
-      className="block p-4 rounded transition-all"
-      style={{ backgroundColor: "#FFFFFF", border: "1px solid #E8E2D6" }}
-    >
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="font-medium text-sm" style={{ color: "#1A1814" }}>
-            {title}
-          </div>
-          {page.page_description && (
-            <div className="text-xs mt-1 line-clamp-1" style={{ color: "#5C574E" }}>
-              {page.page_description}
+    <div className="rounded transition-all" style={{ backgroundColor: "#FFFFFF", border: "1px solid #E8E2D6" }}>
+      <div className="flex items-stretch">
+        <Link
+          href={`/projects/${projectId}/pages/${page.id}`}
+          className="flex-1 p-4 min-w-0"
+        >
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0">
+              <div className="font-medium text-sm" style={{ color: "#1A1814" }}>
+                {title}
+              </div>
+              {page.page_description && (
+                <div className="text-xs mt-1 line-clamp-1" style={{ color: "#5C574E" }}>
+                  {page.page_description}
+                </div>
+              )}
+              <div className="text-xs mt-1.5 break-all" style={{ color: "#8B8478", fontFamily: "ui-monospace, monospace" }}>
+                {page.source_url}
+              </div>
+              <div className="flex items-center gap-3 mt-2 flex-wrap">
+                <StatusChip status={page.status} />
+                {page.section_count > 0 && (
+                  <span className="text-[10px]" style={{ color: "#8B8478", fontFamily: "ui-monospace, monospace" }}>
+                    {page.section_count} section{page.section_count === 1 ? "" : "s"}
+                  </span>
+                )}
+                {page.hubspot_page_url && (
+                  <a
+                    href={page.hubspot_page_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-[10px] inline-flex items-center gap-1"
+                    style={{ color: "#5A7048", fontFamily: "ui-monospace, monospace" }}
+                  >
+                    Open in HubSpot <ExternalLink className="w-2.5 h-2.5" />
+                  </a>
+                )}
+                {page.status_message && (
+                  <span className="text-[10px]" style={{ color: "#9C3D2B" }}>
+                    {page.status_message}
+                  </span>
+                )}
+              </div>
             </div>
-          )}
-          <div className="text-xs mt-1.5 break-all" style={{ color: "#8B8478", fontFamily: "ui-monospace, monospace" }}>
-            {page.source_url}
+            <ArrowRight className="w-4 h-4 flex-shrink-0 mt-1" style={{ color: "#8B8478" }} />
           </div>
-          <div className="flex items-center gap-3 mt-2">
-            <StatusChip status={page.status} />
-            {page.section_count > 0 && (
-              <span className="text-[10px]" style={{ color: "#8B8478", fontFamily: "ui-monospace, monospace" }}>
-                {page.section_count} section{page.section_count === 1 ? "" : "s"}
-              </span>
-            )}
-            {page.status_message && (
-              <span className="text-[10px]" style={{ color: "#9C3D2B" }}>
-                {page.status_message}
-              </span>
-            )}
-          </div>
-        </div>
-        <ArrowRight className="w-4 h-4 flex-shrink-0 mt-1" style={{ color: "#8B8478" }} />
+        </Link>
+        <button
+          onClick={onDeleteClick}
+          aria-label="Delete page from Portage"
+          className="px-3 flex items-center justify-center transition-colors"
+          style={{ color: "#8B8478", borderLeft: "1px solid #E8E2D6" }}
+          onMouseEnter={(e) => { e.currentTarget.style.color = "#9C3D2B"; }}
+          onMouseLeave={(e) => { e.currentTarget.style.color = "#8B8478"; }}
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
       </div>
-    </Link>
+    </div>
   );
 }
 
-export function StatusChip({ status }: { status: string }) {
+function safePathname(url: string): string {
+  try {
+    return new URL(url).pathname || url;
+  } catch {
+    return url;
+  }
+}
+
+function StatusChip({ status }: { status: string }) {
   const config: Record<string, { bg: string; fg: string; label: string }> = {
     draft:       { bg: "#F0EADD", fg: "#5C574E", label: "Draft" },
     parsing:     { bg: "#F5EAD1", fg: "#B8822A", label: "Parsing…" },
@@ -207,6 +265,100 @@ export function StatusChip({ status }: { status: string }) {
     >
       {c.label}
     </span>
+  );
+}
+
+// ============================================================
+// Delete confirmation dialog
+// ============================================================
+
+function DeleteConfirmDialog({
+  page, projectId, onClose, onDeleted,
+}: {
+  page: Page;
+  projectId: string;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const wasPublished = page.status === "published" && !!page.hubspot_page_id;
+  const title = page.page_title ?? safePathname(page.source_url);
+
+  async function confirm() {
+    setError(null);
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/projects/${projectId}/pages/${page.id}`, {
+        method: "DELETE",
+      });
+      const data = await res.json();
+      if (data.ok) onDeleted();
+      else setError(data.error ?? "Couldn't delete");
+    } catch {
+      setError("Couldn't reach the server");
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 flex items-center justify-center p-4 z-50"
+      style={{ backgroundColor: "rgba(26, 24, 20, 0.4)" }}
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md p-6 rounded"
+        style={{ backgroundColor: "#FAF7F2", border: "1px solid #E8E2D6" }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-medium" style={{ color: "#1A1814" }}>
+            Delete page from Portage?
+          </h3>
+          <button onClick={onClose} style={{ color: "#8B8478" }}>
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <p className="text-sm mb-4" style={{ color: "#5C574E", lineHeight: 1.5 }}>
+          This will remove <span style={{ color: "#1A1814", fontWeight: 500 }}>{title}</span>{" "}
+          from this Portage project. You can re-add the same URL later for a fresh migration.
+        </p>
+
+        {wasPublished && (
+          <div className="mb-4 p-3 rounded text-xs" style={{ backgroundColor: "#E8EDE1", color: "#5A7048" }}>
+            <strong>Your published HubSpot page won't be touched.</strong> It stays in your portal exactly as it is. Only Portage forgets about this row.
+          </div>
+        )}
+
+        {error && (
+          <div className="mb-4 p-3 rounded text-xs" style={{ backgroundColor: "#F2DED8", color: "#9C3D2B" }}>
+            {error}
+          </div>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="px-3 py-2 rounded-md text-sm" style={{ color: "#5C574E" }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={confirm}
+            disabled={deleting}
+            className="px-4 py-2 rounded-md text-sm font-medium inline-flex items-center gap-2"
+            style={{ backgroundColor: "#9C3D2B", color: "#FFFFFF", opacity: deleting ? 0.6 : 1 }}
+          >
+            {deleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+            Delete from Portage
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

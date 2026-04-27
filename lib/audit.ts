@@ -15,6 +15,7 @@ export type AuditAction =
   | "theme.indexed"
   | "page.created"
   | "page.updated"
+  | "page.deleted"
   | "file.uploaded"
   | "migration.started"
   | "migration.completed"
