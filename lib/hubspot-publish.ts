@@ -1,17 +1,23 @@
 /**
- * HubSpot publishing helpers — v3.
+ * HubSpot publishing helpers — v4.
  *
- * Adds templateName parameter to createHubSpotPage so callers can specify
- * which template the page should use. Defaults to migration.html convention.
- *
- * The template at <theme>/templates/<templateName> must contain a
- * {% dnd_area "dnd_area" %}{% end_dnd_area %} block — that's the slot our
- * layoutSections payload populates.
+ * Adds path normalization for templatePath. HubSpot's Pages API silently
+ * rejects template paths with a leading slash, which caused pages to be
+ * created without a template association. We strip leading/trailing slashes
+ * defensively here regardless of what's stored.
  */
 
 import crypto from "crypto";
 
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
+
+/**
+ * Strip leading/trailing slashes from a path so HubSpot accepts it.
+ * HubSpot's API documentation states paths must not start with a slash.
+ */
+function cleanPath(p: string): string {
+  return p.replace(/^\/+/, "").replace(/\/+$/, "");
+}
 
 // ============================================================
 // Types
@@ -211,7 +217,7 @@ function buildModuleParams(
 }
 
 // ============================================================
-// Build layoutSections — uses dnd_area as the section name
+// Build layoutSections
 // ============================================================
 
 type LayoutPayload = {
@@ -236,6 +242,9 @@ function buildLayoutSections(
     const widgetName = `widget_${i + 1}`;
     const columnName = `dnd_area-column-${i + 1}`;
 
+    // module_id also needs to not have a leading slash
+    const moduleId = cleanPath(match.matchedModulePath);
+
     const columnObject = {
       name: columnName,
       type: "cell",
@@ -253,7 +262,7 @@ function buildLayoutSections(
                 type: "custom_widget",
                 widget_name: widgetName,
                 widget_type: "module",
-                module_id: match.matchedModulePath,
+                module_id: moduleId,
                 params,
               },
             ],
@@ -289,7 +298,7 @@ export type CreatePageArgs = {
   pageSlug: string;
   metaDescription?: string;
   themePath: string;
-  templateName: string;          // e.g. "migration.html"
+  templateName: string;
   sections: ParsedSection[];
   matches: SectionMatch[];
   imageUrlMap: Map<string, string>;
@@ -303,6 +312,12 @@ export type CreatePageResult =
 export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePageResult> {
   const layoutSections = buildLayoutSections(args.sections, args.matches, args.imageUrlMap);
 
+  // Strip leading/trailing slashes from theme + template parts before
+  // assembling the templatePath. HubSpot's API rejects paths starting with /.
+  const cleanThemePath = cleanPath(args.themePath);
+  const cleanTemplate = cleanPath(args.templateName);
+  const templatePath = `${cleanThemePath}/templates/${cleanTemplate}`;
+
   const body: Record<string, unknown> = {
     name: args.pageTitle,
     htmlTitle: args.pageTitle,
@@ -310,7 +325,7 @@ export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePag
     metaDescription: args.metaDescription ?? "",
     state: "DRAFT",
     layoutSections,
-    templatePath: `${args.themePath}/templates/${args.templateName}`,
+    templatePath,
   };
 
   if (args.contentStagingState === "STAGING") {

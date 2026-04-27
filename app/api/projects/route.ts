@@ -1,22 +1,11 @@
 /**
- * Projects API.
+ * Projects API — v2.
  *
- * GET  /api/projects              — list projects (active only)
- * POST /api/projects              — create a project; also indexes the theme
- *                                    if not already indexed
- *
- * Body for POST:
- *   {
- *     hubId: number,
- *     themePath: string,
- *     name: string,
- *     themeLabel?: string
- *   }
- *
- * Project creation now includes automatic theme indexing. If the theme is
- * already indexed (cached in theme_indexes), creation is fast. If not, we
- * index it inline before returning so the project is immediately usable
- * for the matcher in milestone 4b.
+ * Adds path normalization: leading/trailing slashes are stripped from
+ * themePath before storage. This prevents bugs where templatePath becomes
+ * something like "/Focus-child/templates/migration.html" — HubSpot rejects
+ * paths with leading slashes silently, causing pages to be created without
+ * a template association.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -24,6 +13,10 @@ import { createServiceClient } from "@/lib/supabase";
 import { getAccessToken } from "@/lib/portal-connections";
 import { indexTheme } from "@/lib/module-indexer";
 import { logAudit } from "@/lib/audit";
+
+function cleanThemePath(raw: string): string {
+  return raw.trim().replace(/^\/+/, "").replace(/\/+$/, "");
+}
 
 export async function GET() {
   const supabase = createServiceClient();
@@ -60,12 +53,17 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: false, error: "hubId is required" }, { status: 400 });
   }
 
-  const themePath =
+  // Normalize the theme path: strip leading/trailing slashes
+  const rawThemePath =
     typeof body.themePath === "string" && body.themePath.trim().length > 0
       ? body.themePath.trim()
       : null;
-  if (!themePath) {
+  if (!rawThemePath) {
     return NextResponse.json({ ok: false, error: "themePath is required" }, { status: 400 });
+  }
+  const themePath = cleanThemePath(rawThemePath);
+  if (themePath.length === 0) {
+    return NextResponse.json({ ok: false, error: "themePath is invalid" }, { status: 400 });
   }
 
   const name =
@@ -90,7 +88,6 @@ export async function POST(request: NextRequest) {
     .maybeSingle();
 
   if (!existingIndex) {
-    // Theme isn't indexed yet — do it now
     let accessToken: string;
     try {
       accessToken = await getAccessToken(null, hubId);
@@ -146,11 +143,10 @@ export async function POST(request: NextRequest) {
 
     if (cacheError) {
       console.error("[projects POST] failed to cache index:", cacheError);
-      // Continue anyway — the project can still be created, indexer will retry later
     }
   }
 
-  // Step 2: create the project
+  // Step 2: create the project (with cleaned theme path)
   const { data, error } = await supabase
     .from("projects")
     .insert({
