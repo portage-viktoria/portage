@@ -1,20 +1,19 @@
 /**
- * HubSpot publishing helpers — v4.
+ * HubSpot publishing helpers — v5.
  *
- * Adds path normalization for templatePath. HubSpot's Pages API silently
- * rejects template paths with a leading slash, which caused pages to be
- * created without a template association. We strip leading/trailing slashes
- * defensively here regardless of what's stored.
+ * Final correct layoutSections shape, modeled directly after a real HubSpot
+ * page's JSON response. See the diagnostic dump for reference.
+ *
+ * Each module placement is a "custom_widget" type cell, with the module's
+ * path AND its field values both living inside params. The module's identity
+ * is the path string — module_id (a numeric HubSpot ID) is optional because
+ * HubSpot auto-resolves the path.
  */
 
 import crypto from "crypto";
 
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
 
-/**
- * Strip leading/trailing slashes from a path so HubSpot accepts it.
- * HubSpot's API documentation states paths must not start with a slash.
- */
 function cleanPath(p: string): string {
   return p.replace(/^\/+/, "").replace(/\/+$/, "");
 }
@@ -187,13 +186,27 @@ function resolveFieldValue(
       const img = section.content.images[isNaN(idx) ? 0 : idx];
       if (!img) return "";
       const finalUrl = imageUrlMap.get(img.src) ?? img.src;
+      // HubSpot's image field expects this shape
       return { src: finalUrl, alt: img.alt ?? "" };
     }
     case "link": {
       const idx = parseInt(mapping.value ?? "0", 10);
       const link = section.content.links[isNaN(idx) ? 0 : idx];
       if (!link) return null;
-      return { url: { href: link.href, type: "EXTERNAL" }, text: link.text };
+      // Real HubSpot link field shape (from the dump):
+      // { url: { href, href_with_scheme, type }, no_follow, open_in_new_tab, ... }
+      return {
+        url: {
+          href: link.href,
+          href_with_scheme: link.href,
+          type: "EXTERNAL",
+        },
+        no_follow: false,
+        open_in_new_tab: false,
+        rel: "",
+        sponsored: false,
+        user_generated_content: false,
+      };
     }
     case "literal":
       return mapping.value ?? "";
@@ -204,20 +217,40 @@ function resolveFieldValue(
   }
 }
 
+/**
+ * Build the params object for one module instance.
+ *
+ * The module's own field values live as flat keys alongside the boilerplate
+ * (path, css_class, schema_version, etc.). This matches the real shape from
+ * the HubSpot API response.
+ */
 function buildModuleParams(
   section: ParsedSection,
   match: SectionMatch,
   imageUrlMap: Map<string, string>
 ): Record<string, unknown> {
-  const params: Record<string, unknown> = {};
+  // Boilerplate that every module cell carries
+  const params: Record<string, unknown> = {
+    child_css: {},
+    css: {},
+    css_class: "dnd-module",
+    path: match.matchedModulePath,
+    schema_version: 2,
+    smart_objects: [],
+    smart_type: "NOT_SMART",
+    wrap_field_tag: "div",
+  };
+
+  // Field values, flattened directly into params
   for (const mapping of match.fieldMappings) {
     params[mapping.fieldName] = resolveFieldValue(mapping, section, imageUrlMap);
   }
+
   return params;
 }
 
 // ============================================================
-// Build layoutSections
+// Build layoutSections — final correct shape
 // ============================================================
 
 type LayoutPayload = {
@@ -239,51 +272,44 @@ function buildLayoutSections(
     if (!section) return;
 
     const params = buildModuleParams(section, match, imageUrlMap);
-    const widgetName = `widget_${i + 1}`;
-    const columnName = `dnd_area-column-${i + 1}`;
 
-    // module_id also needs to not have a leading slash
-    const moduleId = cleanPath(match.matchedModulePath);
-
-    const columnObject = {
-      name: columnName,
-      type: "cell",
-      params: { css_class: "dnd-column" },
+    // The module cell. type is "custom_widget", x=0 w=12 for full-width,
+    // params holds both the path and the field values.
+    const moduleCell = {
       cells: [],
-      rowMetaData: [{ cssClass: "dnd-row" }],
-      rows: [
-        {
-          "0": {
-            name: widgetName,
-            type: "cell",
-            cells: [
-              {
-                name: widgetName,
-                type: "custom_widget",
-                widget_name: widgetName,
-                widget_type: "module",
-                module_id: moduleId,
-                params,
-              },
-            ],
-          },
-        },
-      ],
+      cssClass: "",
+      cssId: "",
+      cssStyle: "",
+      name: `dnd_area-module-${i + 1}`,
+      params,
+      rowMetaData: [],
+      rows: [],
+      type: "custom_widget",
+      w: 12,
+      x: 0,
     };
 
-    rows.push({ "0": columnObject });
+    // Each row holds one full-width cell at column index "0"
+    rows.push({ "0": moduleCell });
     rowMetaData.push({ cssClass: "dnd-section" });
   });
 
   return {
+    // The key MUST match the {% dnd_area "..." %} name in the template.
+    // Our migration.html uses {% dnd_area "dnd_area" %} so the key is "dnd_area".
     dnd_area: {
-      name: "dnd_area",
-      type: "section",
-      label: "Main section",
       cells: [],
+      cssClass: "",
+      cssId: "",
+      cssStyle: "",
+      label: "Main section",
+      name: "dnd_area",
       params: {},
       rowMetaData,
       rows,
+      type: "cell",
+      w: 12,
+      x: 0,
     },
   };
 }
@@ -312,8 +338,6 @@ export type CreatePageResult =
 export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePageResult> {
   const layoutSections = buildLayoutSections(args.sections, args.matches, args.imageUrlMap);
 
-  // Strip leading/trailing slashes from theme + template parts before
-  // assembling the templatePath. HubSpot's API rejects paths starting with /.
   const cleanThemePath = cleanPath(args.themePath);
   const cleanTemplate = cleanPath(args.templateName);
   const templatePath = `${cleanThemePath}/templates/${cleanTemplate}`;
