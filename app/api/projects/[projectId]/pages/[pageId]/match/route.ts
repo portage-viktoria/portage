@@ -5,10 +5,16 @@
  *
  * Loads the page's classifications + the project's theme catalog, runs the
  * module matcher per section, stores results in matches_json, status->matched.
+ *
+ * If the theme isn't indexed yet (e.g., the project was created before the
+ * auto-indexing fix), this route will index it inline as a fallback — so
+ * existing projects "just work" without the user needing to detour anywhere.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
+import { getAccessToken } from "@/lib/portal-connections";
+import { indexTheme } from "@/lib/module-indexer";
 import {
   matchSections,
   MatcherInputSection,
@@ -42,6 +48,77 @@ type ClassificationsJson = {
 type ThemeIndexJson = {
   modules: CatalogModule[];
 };
+
+/**
+ * Get or create the theme catalog. If already cached, returns it. If not,
+ * indexes the theme inline and caches it.
+ */
+async function getOrIndexThemeCatalog(
+  hubId: number,
+  themePath: string
+): Promise<{ ok: true; catalog: CatalogModule[] } | { ok: false; error: string }> {
+  const supabase = createServiceClient();
+
+  // Try cache first
+  const { data: existing } = await supabase
+    .from("theme_indexes")
+    .select("modules_json")
+    .eq("hub_id", hubId)
+    .eq("theme_path", themePath)
+    .maybeSingle();
+
+  if (existing) {
+    const catalog = (existing.modules_json as ThemeIndexJson).modules ?? [];
+    if (catalog.length > 0) {
+      return { ok: true, catalog };
+    }
+    // Cached but empty — fall through and re-index
+  }
+
+  // Not cached or empty cache — index now
+  let accessToken: string;
+  try {
+    accessToken = await getAccessToken(null, hubId);
+  } catch {
+    return {
+      ok: false,
+      error: "Portal not connected — can't index theme.",
+    };
+  }
+
+  let result;
+  try {
+    result = await indexTheme(accessToken, themePath);
+  } catch (err) {
+    return {
+      ok: false,
+      error: `Couldn't index theme: ${(err as Error).message}`,
+    };
+  }
+
+  if (result.moduleCount === 0) {
+    return {
+      ok: false,
+      error:
+        "Theme has no readable modules. If this is a child theme of a marketplace " +
+        "theme, you may need to clone the parent's modules into the child first.",
+    };
+  }
+
+  // Cache the result for future calls
+  await supabase.from("theme_indexes").upsert(
+    {
+      hub_id: hubId,
+      theme_path: themePath,
+      modules_json: result,
+      module_count: result.moduleCount,
+      indexed_at: result.scannedAt,
+    },
+    { onConflict: "hub_id,theme_path" }
+  );
+
+  return { ok: true, catalog: result.modules };
+}
 
 export async function POST(
   request: NextRequest,
@@ -81,35 +158,15 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "Project not found" }, { status: 404 });
   }
 
-  // Load theme catalog
-  const { data: themeIndex, error: indexError } = await supabase
-    .from("theme_indexes")
-    .select("modules_json")
-    .eq("hub_id", project.hub_id)
-    .eq("theme_path", project.theme_path)
-    .maybeSingle();
-  if (indexError || !themeIndex) {
+  // Get or build theme catalog (auto-index if missing)
+  const catalogResult = await getOrIndexThemeCatalog(project.hub_id, project.theme_path);
+  if (!catalogResult.ok) {
     return NextResponse.json(
-      {
-        ok: false,
-        error:
-          "Theme hasn't been indexed yet. Index the theme on the main page first.",
-      },
+      { ok: false, error: catalogResult.error },
       { status: 400 }
     );
   }
-
-  const catalog: CatalogModule[] =
-    Array.isArray((themeIndex.modules_json as ThemeIndexJson).modules)
-      ? (themeIndex.modules_json as ThemeIndexJson).modules
-      : [];
-
-  if (catalog.length === 0) {
-    return NextResponse.json(
-      { ok: false, error: "Theme catalog is empty. Re-index the theme." },
-      { status: 400 }
-    );
-  }
+  const catalog = catalogResult.catalog;
 
   // Build matcher inputs by joining parsed sections with classifications
   const parsedJson = page.parsed_json as ParsedJson;
