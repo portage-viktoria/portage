@@ -1,24 +1,12 @@
 /**
- * HubSpot publishing helpers.
+ * HubSpot publishing helpers — v2.
  *
- * Two main operations:
- *   1. uploadImagesToFileManager — fetches each source image URL, uploads
- *      it to HubSpot's File Manager under /hubfs/portage-migrations/...,
- *      returns a map of original URL -> HubSpot URL.
+ * Fixed layoutSections shape: rows are arrays of objects keyed by column
+ * index ("0", "1", etc.), not arrays of column arrays. Section name is
+ * "dnd_area" (the standard drag-and-drop area name in HubSpot themes).
  *
- *   2. createHubSpotPage — assembles a page with layoutSections referencing
- *      matched modules and creates it via the CMS Pages API.
- *
- *   3. detectStagingAvailable — probe whether content staging is usable
- *      on a portal. Returns true/false.
- *
- * Field mapping rules (must match what module-matcher produces):
- *   source="heading" → use section.heading
- *   source="text"    → use section.text
- *   source="image"   → use section.images[parseInt(value)].src (mapped to HubSpot URL)
- *   source="link"    → use section.links[parseInt(value)]
- *   source="literal" → use mapping.value
- *   source="list"    → for repeaters; left empty (manual review needed)
+ * Reference: HubSpot's documented example payload at
+ *   https://developers.hubspot.com/docs/api-reference/cms-pages-v3/guide
  */
 
 import crypto from "crypto";
@@ -26,7 +14,7 @@ import crypto from "crypto";
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
 
 // ============================================================
-// Types — match shapes from parser, classifier, matcher
+// Types
 // ============================================================
 
 export type ParsedSection = {
@@ -60,36 +48,11 @@ export type SectionMatch = {
 };
 
 // ============================================================
-// Tier detection — probe content staging availability
+// Tier detection
 // ============================================================
 
-/**
- * Try a lightweight read against the content staging endpoint to determine
- * if staging is available on this portal. Returns true if staging is usable.
- *
- * We use GET /cms/v3/pages/site-pages?contentStagingState=STAGING&limit=1
- * which any tier with staging access can call. Starter tier returns 403.
- */
 export async function detectStagingAvailable(accessToken: string): Promise<boolean> {
   try {
-    const res = await fetch(
-      `${HUBSPOT_API_BASE}/cms/v3/pages/site-pages?limit=1&archived=false`,
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/json",
-        },
-      }
-    );
-    // If listing pages returns 200 with a special "staging" filter accepted,
-    // staging is enabled. We can't perfectly tell from this single call, so
-    // we use a stronger probe: try to create an empty staging page (we won't
-    // — instead, we look for the staging-specific endpoint's permissions).
-    if (!res.ok) return false;
-
-    // Probe further: try the staging-specific endpoint with a staging filter.
-    // If the portal lacks staging, this returns 403.
     const stageProbe = await fetch(
       `${HUBSPOT_API_BASE}/cms/v3/pages/site-pages?contentStagingState=STAGING&limit=1`,
       {
@@ -107,7 +70,7 @@ export async function detectStagingAvailable(accessToken: string): Promise<boole
 }
 
 // ============================================================
-// Image upload to File Manager
+// Image upload
 // ============================================================
 
 function urlHash(url: string): string {
@@ -125,16 +88,11 @@ function inferFilename(url: string, fallback: string): string {
   return fallback;
 }
 
-/**
- * Upload one image URL to HubSpot File Manager. Returns the public URL of
- * the uploaded file, or null if upload fails.
- */
 async function uploadOneImage(
   accessToken: string,
   sourceImageUrl: string,
   folderPath: string
 ): Promise<string | null> {
-  // Step 1: fetch the original image
   let imageBytes: ArrayBuffer;
   let contentType: string;
   try {
@@ -149,9 +107,7 @@ async function uploadOneImage(
     return null;
   }
 
-  // Step 2: upload to HubSpot
   const filename = inferFilename(sourceImageUrl, `image-${urlHash(sourceImageUrl)}.png`);
-
   const form = new FormData();
   form.append("file", new Blob([imageBytes], { type: contentType }), filename);
   form.append("folderPath", folderPath);
@@ -180,17 +136,11 @@ async function uploadOneImage(
   }
 }
 
-/**
- * Upload all unique images from a list of parsed sections.
- * Returns a map: original_image_url -> hubspot_image_url.
- * Failed uploads keep the original URL as a fallback.
- */
 export async function uploadImagesToFileManager(
   accessToken: string,
   sections: ParsedSection[],
   sourceDomain: string
 ): Promise<Map<string, string>> {
-  // Collect unique image URLs
   const uniqueUrls = new Set<string>();
   for (const s of sections) {
     for (const img of s.content.images) {
@@ -203,31 +153,19 @@ export async function uploadImagesToFileManager(
   const today = new Date().toISOString().slice(0, 10);
   const folder = `/portage-migrations/${sourceDomain}/${today}`;
 
-  // Upload sequentially to be gentle on rate limits.
-  // For 20+ images, this is slow but reliable. We can parallelize later.
   const result = new Map<string, string>();
   for (const url of uniqueUrls) {
     const uploadedUrl = await uploadOneImage(accessToken, url, folder);
-    if (uploadedUrl) {
-      result.set(url, uploadedUrl);
-    } else {
-      // Failed upload — fall back to original URL so the page still renders
-      result.set(url, url);
-    }
+    result.set(url, uploadedUrl ?? url);
   }
 
   return result;
 }
 
 // ============================================================
-// Build module field values from a section's content
+// Field value resolution
 // ============================================================
 
-type ModuleParams = Record<string, unknown>;
-
-/**
- * Resolve a single field mapping into the actual value to put in the module.
- */
 function resolveFieldValue(
   mapping: FieldMapping,
   section: ParsedSection,
@@ -236,10 +174,8 @@ function resolveFieldValue(
   switch (mapping.source) {
     case "heading":
       return section.content.heading ?? "";
-
     case "text":
       return section.content.text ?? "";
-
     case "image": {
       const idx = parseInt(mapping.value ?? "0", 10);
       const img = section.content.images[isNaN(idx) ? 0 : idx];
@@ -247,40 +183,148 @@ function resolveFieldValue(
       const finalUrl = imageUrlMap.get(img.src) ?? img.src;
       return { src: finalUrl, alt: img.alt ?? "" };
     }
-
     case "link": {
       const idx = parseInt(mapping.value ?? "0", 10);
       const link = section.content.links[isNaN(idx) ? 0 : idx];
       if (!link) return null;
       return { url: { href: link.href, type: "EXTERNAL" }, text: link.text };
     }
-
     case "literal":
       return mapping.value ?? "";
-
     case "list":
-      // Repeaters require manual handling — return empty array so HubSpot
-      // creates the module with an empty repeater that the user can fill in.
       return [];
-
     default:
       return "";
   }
 }
 
-/**
- * Build the module params object for a single matched section.
- */
 function buildModuleParams(
   section: ParsedSection,
   match: SectionMatch,
   imageUrlMap: Map<string, string>
-): ModuleParams {
-  const params: ModuleParams = {};
+): Record<string, unknown> {
+  const params: Record<string, unknown> = {};
   for (const mapping of match.fieldMappings) {
     params[mapping.fieldName] = resolveFieldValue(mapping, section, imageUrlMap);
   }
   return params;
+}
+
+// ============================================================
+// Build the layoutSections payload — CORRECTED SHAPE
+//
+// HubSpot's drag-and-drop area expects this shape:
+//
+//   layoutSections: {
+//     dnd_area: {
+//       name: "dnd_area",
+//       type: "section",
+//       label: "Main section",
+//       cells: [],
+//       params: {},
+//       rowMetaData: [...one entry per row...],
+//       rows: [
+//         { "0": <column_object_for_row_0> },
+//         { "0": <column_object_for_row_1> },
+//         ...
+//       ]
+//     }
+//   }
+//
+// Each <column_object> contains:
+//   {
+//     name: "dnd_area-column-N",
+//     type: "cell",
+//     params: { css_class: "dnd-column" },
+//     cells: [],
+//     rowMetaData: [{ cssClass: "dnd-row" }],
+//     rows: [
+//       { "0": <widget_wrapper_for_module> }
+//     ]
+//   }
+//
+// Each <widget_wrapper> is an object containing the widget definition:
+//   {
+//     name: "widget_name",
+//     type: "cell",
+//     cells: [
+//       {
+//         name: "widget_name",
+//         type: "custom_widget",
+//         widget_name: "widget_name",
+//         widget_type: "module",
+//         module_id: "<theme_path>/modules/<name>",
+//         params: { ...module field values... }
+//       }
+//     ]
+//   }
+// ============================================================
+
+type LayoutPayload = {
+  dnd_area: Record<string, unknown>;
+};
+
+function buildLayoutSections(
+  sections: ParsedSection[],
+  matches: SectionMatch[],
+  imageUrlMap: Map<string, string>
+): LayoutPayload {
+  const sectionById = new Map(sections.map((s) => [s.id, s]));
+
+  // Build one row per matched section
+  const rows: Array<Record<string, unknown>> = [];
+  const rowMetaData: Array<Record<string, unknown>> = [];
+
+  matches.forEach((match, i) => {
+    const section = sectionById.get(match.sectionId);
+    if (!section) return;
+
+    const params = buildModuleParams(section, match, imageUrlMap);
+    const widgetName = `widget_${i + 1}`;
+    const columnName = `dnd_area-column-${i + 1}`;
+
+    // Inner row: a column containing one widget
+    const columnObject = {
+      name: columnName,
+      type: "cell",
+      params: { css_class: "dnd-column" },
+      cells: [],
+      rowMetaData: [{ cssClass: "dnd-row" }],
+      rows: [
+        {
+          "0": {
+            name: widgetName,
+            type: "cell",
+            cells: [
+              {
+                name: widgetName,
+                type: "custom_widget",
+                widget_name: widgetName,
+                widget_type: "module",
+                module_id: match.matchedModulePath,
+                params,
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    rows.push({ "0": columnObject });
+    rowMetaData.push({ cssClass: "dnd-section" });
+  });
+
+  return {
+    dnd_area: {
+      name: "dnd_area",
+      type: "section",
+      label: "Main section",
+      cells: [],
+      params: {},
+      rowMetaData,
+      rows,
+    },
+  };
 }
 
 // ============================================================
@@ -296,78 +340,15 @@ export type CreatePageArgs = {
   sections: ParsedSection[];
   matches: SectionMatch[];
   imageUrlMap: Map<string, string>;
-  // Whether to create in content staging vs. live as draft
   contentStagingState: "STAGING" | "DRAFT";
 };
 
-export type CreatePageResult = {
-  ok: true;
-  pageId: string;
-  url?: string;
-} | {
-  ok: false;
-  error: string;
-};
+export type CreatePageResult =
+  | { ok: true; pageId: string; url?: string }
+  | { ok: false; error: string };
 
-/**
- * Build a single layoutSection cell containing one module instance.
- * HubSpot's layoutSections format is documented at:
- * https://developers.hubspot.com/docs/api/cms/pages
- */
-function buildLayoutCell(
-  cellName: string,
-  moduleName: string,
-  modulePath: string,
-  params: ModuleParams,
-  index: number
-): Record<string, unknown> {
-  // Each cell is one named section in layoutSections, containing rows of
-  // columns with widgets. We use a simple single-column-per-row layout.
-  return {
-    name: cellName,
-    type: "section",
-    rows: [
-      {
-        columns: [
-          {
-            widgets: [
-              {
-                name: `${moduleName}_${index}`,
-                module_id: modulePath,
-                params,
-                type: "module",
-              },
-            ],
-            width: 12,
-          },
-        ],
-      },
-    ],
-  };
-}
-
-export async function createHubSpotPage(
-  args: CreatePageArgs
-): Promise<CreatePageResult> {
-  const sectionById = new Map(args.sections.map((s) => [s.id, s]));
-
-  // Build layoutSections object
-  const layoutSections: Record<string, unknown> = {};
-  for (let i = 0; i < args.matches.length; i++) {
-    const match = args.matches[i];
-    const section = sectionById.get(match.sectionId);
-    if (!section) continue;
-
-    const params = buildModuleParams(section, match, args.imageUrlMap);
-    const cellName = `cell_${i + 1}`;
-    layoutSections[cellName] = buildLayoutCell(
-      cellName,
-      match.matchedModule,
-      match.matchedModulePath,
-      params,
-      i
-    );
-  }
+export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePageResult> {
+  const layoutSections = buildLayoutSections(args.sections, args.matches, args.imageUrlMap);
 
   const body: Record<string, unknown> = {
     name: args.pageTitle,
@@ -376,13 +357,8 @@ export async function createHubSpotPage(
     metaDescription: args.metaDescription ?? "",
     state: "DRAFT",
     layoutSections,
+    templatePath: `${args.themePath}/templates/page.html`,
   };
-
-  // Add theme path. HubSpot uses templatePath for the layout source; we point
-  // at the theme's default page template.
-  // NOTE: this assumes the theme has a templates/page.html, which is convention
-  // for HubSpot themes. If not, the user will need to specify a template later.
-  body.templatePath = `${args.themePath}/templates/page.html`;
 
   if (args.contentStagingState === "STAGING") {
     body.contentStagingState = "STAGING";
