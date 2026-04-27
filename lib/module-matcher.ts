@@ -1,19 +1,10 @@
 /**
- * Module matcher.
+ * Module matcher — v2.
  *
- * Given a list of classified sections and a theme's indexed module catalog,
- * uses Claude to select the best-fitting module for each section and
- * produce a content-to-field mapping.
- *
- * Architecture: one Claude call per section. Slightly more expensive than
- * batching, but each match is independent which makes the UX simpler
- * (per-section retry, per-section swap in a future milestone).
- *
- * The matcher operates in two passes per section:
- *   1. Filter the catalog to candidate modules whose structural tags overlap
- *      with the section's classified type.
- *   2. Send the section's content + the candidate modules' shapes to Claude,
- *      which picks one and maps content to fields.
+ * Uses the module's REAL field names (from fieldDetails) when prompting Claude,
+ * so the resulting fieldMappings have keys that actually match the module's
+ * fields.json. Without this, the matcher would invent generic names like
+ * "headline" / "body" that don't match anything in the actual module.
  */
 
 import { callAnthropic, extractText, parseJsonResponse } from "./anthropic";
@@ -34,13 +25,21 @@ export type MatcherInputSection = {
   wordCount: number;
 };
 
-// Module entries as stored in theme_indexes.modules_json
+// Full catalog entry — matches what indexer v2 produces
 export type CatalogModule = {
   name: string;
   label: string;
   description?: string;
   path: string;
   fields: Array<{ type: string; category: string; count: number }>;
+  fieldDetails?: Array<{
+    name: string;
+    label: string;
+    type: string;
+    category: string;
+    isRepeater: boolean;
+    childFields?: Array<{ name: string; type: string; category: string }>;
+  }>;
   hasRepeater: boolean;
   totalFields: number;
   tags: string[];
@@ -52,28 +51,25 @@ export type CatalogModule = {
 // ============================================================
 
 export type FieldMapping = {
-  fieldName: string;          // module's field name from fields.json
-  fieldType: string;          // category like "text", "image", "link"
+  fieldName: string;       // exact field name from fields.json
+  fieldType: string;
   source: "heading" | "text" | "image" | "link" | "literal" | "list";
-  // For source="literal", the actual value
-  // For others, an index/path describing where the data comes from
   value?: string;
-  description: string;        // human-readable: "Section heading", "First image", etc.
+  description: string;
 };
 
 export type MatcherResult = {
   sectionId: string;
-  matchedModule: string;       // module.name from catalog, or "rich_text_fallback"
+  matchedModule: string;
   matchedModulePath: string;
   confidence: number;
   reasoning: string;
   fieldMappings: FieldMapping[];
-  // If true, no good match was found and we'll fall back to a generic rich_text module
   isFallback: boolean;
 };
 
 // ============================================================
-// Candidate filtering — narrow the catalog before asking Claude
+// Candidate filtering
 // ============================================================
 
 const TYPE_TO_TAGS: Record<string, string[]> = {
@@ -107,8 +103,6 @@ function filterCandidates(
     return m.tags.some((t) => desiredTags.has(t));
   });
 
-  // If filtering produced nothing useful, fall back to the full catalog so
-  // Claude can pick anything. Better than telling it "you have no options."
   return matches.length > 0 ? matches : catalog;
 }
 
@@ -116,54 +110,55 @@ function filterCandidates(
 // Prompt construction
 // ============================================================
 
-const SYSTEM_PROMPT = `You are matching a section of a webpage to a HubSpot CMS module that will hold its content.
+const SYSTEM_PROMPT = `You match a section of a webpage to a HubSpot CMS module that holds its content.
 
 You receive:
 1. A SECTION with extracted content (heading, text, images, links)
-2. A list of CANDIDATE MODULES with their fields
+2. A list of CANDIDATE MODULES, each with their EXACT field names
 
-Your job is to:
-1. Pick the SINGLE best-fitting module from the candidates
-2. Map the section's content into that module's fields
-3. Provide a confidence score (0.0-1.0) and brief reasoning
+Pick the SINGLE best-fitting module and produce field mappings using the module's EXACT field names. Field names must match the module's fields.json exactly — do not invent or rename them.
 
-Field mapping rules:
-- For text fields, map the section's heading to a heading-like field, body text to a text/richtext field
+Mapping rules:
+- For text fields, map the section's heading to a heading-like field (e.g. "title", "heading", "headline" — whichever the module actually has)
+- For richtext fields, send the section's body text
 - For image fields, use the section's images in document order (first image to first image field, etc.)
-- For link fields, map link text + href; prefer the most prominent link as the primary CTA
-- For repeater fields (groups with multiple items), only mark them as needing manual splitting — set source="list" and leave value empty
+- For link/cta/url fields, map link text + href; prefer the most prominent link
+- For repeater (group) fields, set source="list" and value=""; the user splits manually
 - If the section has more content than the module can hold, ignore the extras
-- If the module has fields that the section doesn't fill, leave those mappings out
+- If the module has fields the section doesn't fill, leave those mappings out
 
-Respond with a JSON object only — no markdown, no extra text:
+Respond with ONLY a JSON object — no markdown, no extra text:
 {
   "matchedModule": "module-name",
   "confidence": 0.0-1.0,
   "reasoning": "one short sentence",
   "fieldMappings": [
-    {
-      "fieldName": "headline",
-      "fieldType": "text",
-      "source": "heading",
-      "description": "Section's primary heading"
-    },
-    {
-      "fieldName": "body",
-      "fieldType": "text",
-      "source": "text",
-      "description": "Full section text"
-    },
-    {
-      "fieldName": "image",
-      "fieldType": "image",
-      "source": "image",
-      "value": "0",
-      "description": "First image in section"
-    }
+    { "fieldName": "title", "fieldType": "text", "source": "heading", "description": "Section heading" },
+    { "fieldName": "text",  "fieldType": "richtext", "source": "text", "description": "Body content" },
+    { "fieldName": "image", "fieldType": "image", "source": "image", "value": "0", "description": "First image" }
   ]
 }
 
-If no module is a reasonable fit, set "matchedModule" to "rich_text_fallback" and provide a single mapping for the whole content.`;
+If no module is a reasonable fit, set "matchedModule" to "rich_text_fallback".`;
+
+function describeFieldDetails(m: CatalogModule): string {
+  if (!m.fieldDetails || m.fieldDetails.length === 0) {
+    // Fallback — old-style summary
+    return `Field summary: ${m.fields.map((f) => `${f.category}×${f.count}`).join(", ")}`;
+  }
+  const lines: string[] = [];
+  for (const f of m.fieldDetails) {
+    if (f.isRepeater) {
+      const children = f.childFields
+        ? f.childFields.map((c) => `${c.name}:${c.type}`).join(", ")
+        : "?";
+      lines.push(`  - ${f.name} (${f.type}, REPEATER) children: [${children}]`);
+    } else {
+      lines.push(`  - ${f.name} (${f.type})`);
+    }
+  }
+  return `Fields:\n${lines.join("\n")}`;
+}
 
 function buildUserPrompt(
   section: MatcherInputSection,
@@ -173,20 +168,33 @@ function buildUserPrompt(
 
   parts.push("=== SECTION TO MATCH ===");
   parts.push(`ID: ${section.id}`);
-  parts.push(`Classified type: ${section.classifiedType} (confidence ${section.classifiedConfidence.toFixed(2)})`);
+  parts.push(
+    `Classified type: ${section.classifiedType} (confidence ${section.classifiedConfidence.toFixed(2)})`
+  );
   if (section.heading) parts.push(`Primary heading: ${section.heading}`);
   if (section.headings.length > 0) {
-    parts.push(`All headings: ${section.headings.slice(0, 8).map((h) => `H${h.level}: ${h.text}`).join(" | ")}`);
+    parts.push(
+      `All headings: ${section.headings
+        .slice(0, 8)
+        .map((h) => `H${h.level}: ${h.text}`)
+        .join(" | ")}`
+    );
   }
   parts.push(`Word count: ${section.wordCount}`);
   parts.push(`Image count: ${section.images.length}`);
   if (section.images.length > 0) {
-    parts.push(`Image alts: ${section.images.slice(0, 5).map((i) => i.alt ?? "(no alt)").join(" | ")}`);
+    parts.push(
+      `Image alts: ${section.images
+        .slice(0, 5)
+        .map((i) => i.alt ?? "(no alt)")
+        .join(" | ")}`
+    );
   }
   if (section.links.length > 0) {
     parts.push(`Links: ${section.links.slice(0, 5).map((l) => l.text).join(" | ")}`);
   }
-  const truncatedText = section.text.length > 600 ? section.text.slice(0, 600) + "…" : section.text;
+  const truncatedText =
+    section.text.length > 600 ? section.text.slice(0, 600) + "…" : section.text;
   parts.push(`Text:\n${truncatedText}`);
 
   parts.push("");
@@ -197,8 +205,7 @@ function buildUserPrompt(
     parts.push(`Label: ${m.label}`);
     if (m.description) parts.push(`Description: ${m.description}`);
     parts.push(`Tags: ${m.tags.join(", ")}`);
-    parts.push(`Has repeater: ${m.hasRepeater}`);
-    parts.push(`Field summary: ${m.fields.map((f) => `${f.category}×${f.count}`).join(", ")}`);
+    parts.push(describeFieldDetails(m));
     parts.push("");
   }
 
@@ -269,7 +276,6 @@ async function matchSingleSection(
     typeof parsed.matchedModule === "string" ? parsed.matchedModule : "rich_text_fallback";
   const isFallback = matchedModule === "rich_text_fallback";
 
-  // Find the module in the catalog so we know its full path
   const found = candidates.find((c) => c.name === matchedModule);
   const matchedModulePath = found?.path ?? "";
 

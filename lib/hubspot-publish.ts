@@ -1,15 +1,16 @@
 /**
- * HubSpot publishing helpers — v5 (corrected against real HubSpot page JSON).
+ * HubSpot publishing helpers — v6 (path INSIDE params, per real HubSpot JSON).
  *
  * Module instance shape inside layoutSections — verified against a real
- * HubSpot-generated page:
+ * HubSpot-generated page AND HubSpot's own developer AI guidance:
  *
  *   {
  *     "0": {
  *       "name": "dnd_area-module-1",
  *       "type": "custom_widget",
- *       "path": "/Focus-child/modules/some-module",
  *       "params": {
+ *         "path": "/Focus-child/modules/some-module",  ← path is INSIDE params
+ *         "schema_version": 2,
  *         "css_class": "dnd-module",
  *         "title": "...",
  *         "text": "...",
@@ -23,33 +24,25 @@
  *     }
  *   }
  *
- * Important rules from the real JSON:
+ * Critical rules:
  *   - templatePath: NO leading slash (HubSpot rejects)
- *   - module path inside layoutSections: KEEP leading slash (HubSpot stores it that way)
+ *   - module path inside params: KEEP leading slash for theme paths
  *   - module's field values go directly under params, flat
+ *   - schema_version: 2 is REQUIRED (without it, the editor can't render)
  *   - css_class: "dnd-module" goes in params
- *   - cells, rows, rowMetaData are empty arrays (still required as keys)
- *   - w: 12, x: 0 for full-width single-column rows
  */
 
 import crypto from "crypto";
 
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
 
-/**
- * For templatePath — HubSpot rejects paths starting with /
- */
 function cleanTemplatePath(p: string): string {
   return p.replace(/^\/+/, "").replace(/\/+$/, "");
 }
 
-/**
- * For module paths inside layoutSections — HubSpot expects a leading /
- * for theme-relative paths. We ensure it without doubling up.
- */
 function ensureLeadingSlashForModule(p: string): string {
   if (!p) return p;
-  if (p.startsWith("@")) return p;  // marketplace-style paths like @hubspot/rich_text
+  if (p.startsWith("@")) return p;
   if (p.startsWith("/")) return p;
   return `/${p}`;
 }
@@ -228,9 +221,14 @@ function resolveFieldValue(
       const idx = parseInt(mapping.value ?? "0", 10);
       const link = section.content.links[isNaN(idx) ? 0 : idx];
       if (!link) return null;
+      // Format used by Focus-child's modules per the real page JSON
       return {
-        url: { href: link.href, type: "EXTERNAL" },
         button_text: link.text,
+        button_link: {
+          url: { href: link.href, type: "EXTERNAL" },
+          no_follow: false,
+          open_in_new_tab: false,
+        },
       };
     }
     case "literal":
@@ -249,6 +247,8 @@ function buildModuleParams(
 ): Record<string, unknown> {
   // Required base params for any drag-and-drop module instance
   const params: Record<string, unknown> = {
+    path: ensureLeadingSlashForModule(match.matchedModulePath),
+    schema_version: 2,
     css_class: "dnd-module",
   };
 
@@ -261,9 +261,6 @@ function buildModuleParams(
 
 // ============================================================
 // Build layoutSections
-//
-// One row per matched section. Each row has a single column at index "0"
-// containing the module instance directly (no extra wrapping cells).
 // ============================================================
 
 type LayoutPayload = {
@@ -286,13 +283,11 @@ function buildLayoutSections(
 
     const params = buildModuleParams(section, match, imageUrlMap);
     const moduleName = `dnd_area-module-${i + 1}`;
-    const modulePath = ensureLeadingSlashForModule(match.matchedModulePath);
 
     // Module instance directly inside the row at column index "0"
     const moduleInstance = {
       name: moduleName,
       type: "custom_widget",
-      path: modulePath,
       params,
       cells: [],
       rows: [],
@@ -347,7 +342,6 @@ export type CreatePageResult =
 export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePageResult> {
   const layoutSections = buildLayoutSections(args.sections, args.matches, args.imageUrlMap);
 
-  // templatePath: clean (no leading slash)
   const cleanTheme = cleanTemplatePath(args.themePath);
   const cleanTemplate = cleanTemplatePath(args.templateName);
   const templatePath = `${cleanTheme}/templates/${cleanTemplate}`;

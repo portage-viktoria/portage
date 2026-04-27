@@ -1,47 +1,54 @@
 /**
- * Module indexer.
+ * Module indexer — v2.
  *
- * Given a HubSpot access token and a theme path, walks the theme's `modules/`
- * folder and produces a structured catalog. Each module entry summarizes:
- *   - identity (path, name, label)
- *   - content shape (what fields it accepts, repeater info)
- *   - structural hints (grid? accordion? card row? hero?)
- *   - any author-supplied tags
+ * Captures the actual field NAMES from each module's fields.json, not just
+ * categorized counts. This is critical because the matcher needs to produce
+ * params keyed by the module's exact field names (e.g. "title", "text",
+ * "image"), not generic names like "headline" or "body".
  *
- * The output of this module is what gets stored in theme_indexes.modules_json
- * and what the UI browser renders. Keep it stable — schema changes here
- * require a re-index.
- *
- * Defensive throughout: HubSpot's module files are author-written, which means
- * they contain weird edge cases. We accept "missing field," "wrong type," and
- * "empty string" everywhere and degrade gracefully.
+ * Backwards-compatible: keeps the old `fields` summary array for the UI,
+ * adds a new `fieldDetails` array with full information for the matcher.
  */
 
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
 const MAX_CONCURRENCY = 5;
 
 // ============================================================
-// Types — the shape of a catalog
+// Types
 // ============================================================
 
 export type FieldSummary = {
-  type: string; // raw HubSpot field type
-  category: FieldCategory; // our normalized bucket
-  count: number; // how many fields of this type appear in the module
+  type: string;
+  category: FieldCategory;
+  count: number;
 };
 
 export type FieldCategory =
-  | "text" // text, richtext
-  | "image" // image
-  | "link" // link, url, cta
-  | "choice" // choice, boolean
+  | "text"
+  | "image"
+  | "link"
+  | "choice"
   | "color"
   | "number"
   | "icon"
-  | "embed" // video, embed
-  | "repeater" // group with occurrence (i.e. a list of repeating items)
-  | "group" // non-repeating field group
+  | "embed"
+  | "repeater"
+  | "group"
   | "other";
+
+/**
+ * Per-field detail used by the matcher. Captures enough information that
+ * Claude can pick the right field for each piece of source content.
+ */
+export type FieldDetail = {
+  name: string;          // exact field key from fields.json
+  label: string;         // human label
+  type: string;          // raw HubSpot field type
+  category: FieldCategory;
+  isRepeater: boolean;
+  // For repeaters, the children's field names so Claude understands the shape
+  childFields?: Array<{ name: string; type: string; category: FieldCategory }>;
+};
 
 export type StructuralTag =
   | "hero"
@@ -61,36 +68,33 @@ export type StructuralTag =
   | "unknown";
 
 export type ModuleEntry = {
-  name: string; // folder name, e.g. "accordion"
-  label: string; // human-readable from meta.json, fallback to name
+  name: string;
+  label: string;
   description?: string;
-  path: string; // full path within the theme, e.g. "Focus-child/modules/accordion"
-  // Field summary
+  path: string;
+  // Existing aggregate summary (kept for UI compatibility)
   fields: FieldSummary[];
+  // NEW: detailed per-field info for the matcher
+  fieldDetails: FieldDetail[];
   hasRepeater: boolean;
   totalFields: number;
-  // Structural classification
   tags: StructuralTag[];
-  // Author signals from meta.json
-  metaTags?: string[]; // tags as written by the author
+  metaTags?: string[];
   isGlobal?: boolean;
-  contentTypes?: string[]; // page types module is allowed on
-  // Diagnostic info — sometimes a module fails to fully parse and we want to
-  // surface that in the UI rather than silently dropping it
+  contentTypes?: string[];
   warnings: string[];
 };
 
 export type IndexResult = {
   themePath: string;
   modules: ModuleEntry[];
-  // Catalog-level diagnostics
   moduleCount: number;
-  warnings: string[]; // issues encountered at the catalog level (e.g. /modules folder missing)
-  scannedAt: string; // ISO timestamp
+  warnings: string[];
+  scannedAt: string;
 };
 
 // ============================================================
-// Concurrency limiter (same pattern as elsewhere)
+// Concurrency
 // ============================================================
 
 async function parallelLimit<T, R>(
@@ -172,7 +176,6 @@ async function fetchJsonFile<T = unknown>(
   const text = await fetchTextFile(accessToken, path);
   if (text === null) return null;
   try {
-    // Strip BOM if present (some HubSpot files have it)
     const cleaned = text.replace(/^\uFEFF/, "");
     return JSON.parse(cleaned) as T;
   } catch {
@@ -181,7 +184,7 @@ async function fetchJsonFile<T = unknown>(
 }
 
 // ============================================================
-// Field analysis — turn a module's fields.json into a summary
+// Field analysis
 // ============================================================
 
 type FieldsJsonNode = {
@@ -206,17 +209,18 @@ function categorizeField(type: string): FieldCategory {
 }
 
 /**
- * Walk a fields.json tree and produce a summary of field types/counts.
- * Repeating groups (groups with occurrence.max > 1) are collapsed into a
- * single "repeater" entry — we don't recurse into their children for the
- * top-level summary because a repeater's shape is its child template.
+ * Walk fields.json. Produces both:
+ *   - `fields`: aggregated summary by category (existing UI uses this)
+ *   - `fieldDetails`: per-field info with exact names (for the matcher)
  */
-function summarizeFields(fieldsJson: unknown): {
+function analyzeFields(fieldsJson: unknown): {
   fields: FieldSummary[];
+  fieldDetails: FieldDetail[];
   hasRepeater: boolean;
   totalFields: number;
 } {
   const counts = new Map<FieldCategory, { count: number; rawTypes: Set<string> }>();
+  const details: FieldDetail[] = [];
   let hasRepeater = false;
   let totalFields = 0;
 
@@ -224,42 +228,79 @@ function summarizeFields(fieldsJson: unknown): {
     for (const node of nodes) {
       if (!node || typeof node !== "object") continue;
       const type = typeof node.type === "string" ? node.type : "";
+      const name = typeof node.name === "string" ? node.name : "";
+      const label = typeof node.label === "string" ? node.label : name;
 
-      // A group with occurrence.max > 1 (or unbounded) is a repeater
       if (type === "group") {
         const occ = node.occurrence;
-        const isRepeater = !!occ && (occ.max === undefined || (typeof occ.max === "number" && occ.max > 1));
+        const isRepeater =
+          !!occ &&
+          (occ.max === undefined ||
+            (typeof occ.max === "number" && occ.max > 1));
+
         if (isRepeater) {
           hasRepeater = true;
+          // Aggregate
           const existing = counts.get("repeater") ?? { count: 0, rawTypes: new Set() };
           existing.count += 1;
           existing.rawTypes.add("group");
           counts.set("repeater", existing);
           totalFields += 1;
-          // Don't recurse into a repeater's children at this level — its
-          // shape is its child template, surfaced separately if needed
+
+          // Detail entry capturing children's names
+          const childFields =
+            Array.isArray(node.children)
+              ? node.children
+                  .filter((c) => c && typeof c.name === "string" && typeof c.type === "string")
+                  .map((c) => ({
+                    name: c.name as string,
+                    type: c.type as string,
+                    category: categorizeField(c.type as string),
+                  }))
+              : undefined;
+
+          if (name) {
+            details.push({
+              name,
+              label,
+              type: "group",
+              category: "repeater",
+              isRepeater: true,
+              childFields,
+            });
+          }
           continue;
         }
-        // Non-repeating group — recurse to count its children
-        if (Array.isArray(node.children)) {
-          walk(node.children);
-        }
+
+        // Non-repeating group — recurse
+        if (Array.isArray(node.children)) walk(node.children);
         continue;
       }
 
       if (!type) continue;
       const category = categorizeField(type);
+
+      // Aggregate
       const existing = counts.get(category) ?? { count: 0, rawTypes: new Set() };
       existing.count += 1;
       existing.rawTypes.add(type);
       counts.set(category, existing);
       totalFields += 1;
+
+      // Detail entry
+      if (name) {
+        details.push({
+          name,
+          label,
+          type,
+          category,
+          isRepeater: false,
+        });
+      }
     }
   }
 
-  if (Array.isArray(fieldsJson)) {
-    walk(fieldsJson as FieldsJsonNode[]);
-  }
+  if (Array.isArray(fieldsJson)) walk(fieldsJson as FieldsJsonNode[]);
 
   const fields: FieldSummary[] = Array.from(counts.entries()).map(
     ([category, info]) => ({
@@ -268,15 +309,13 @@ function summarizeFields(fieldsJson: unknown): {
       count: info.count,
     })
   );
-
   fields.sort((a, b) => b.count - a.count);
 
-  return { fields, hasRepeater, totalFields };
+  return { fields, fieldDetails: details, hasRepeater, totalFields };
 }
 
 // ============================================================
-// Structural classification — turn name + label + meta tags + fields
-// into a small set of structural hints
+// Structural classification
 // ============================================================
 
 const NAME_PATTERNS: Array<[RegExp, StructuralTag]> = [
@@ -303,11 +342,9 @@ function classifyStructure(
 ): StructuralTag[] {
   const tags = new Set<StructuralTag>();
   const haystack = `${name} ${label} ${metaTags.join(" ")}`.toLowerCase();
-
   for (const [pattern, tag] of NAME_PATTERNS) {
     if (pattern.test(haystack)) tags.add(tag);
   }
-
   if (tags.size === 0) tags.add("unknown");
   return Array.from(tags);
 }
@@ -334,24 +371,16 @@ async function indexModule(
   const modulePath = `${themePath}/modules/${moduleName}`;
   const warnings: string[] = [];
 
-  // fields.json — the content shape
-  const fieldsJson = await fetchJsonFile<unknown>(
-    accessToken,
-    `${modulePath}/fields.json`
-  );
-  let fieldSummary: ReturnType<typeof summarizeFields>;
+  const fieldsJson = await fetchJsonFile<unknown>(accessToken, `${modulePath}/fields.json`);
+  let analysis;
   if (fieldsJson === null) {
     warnings.push("fields.json missing or unreadable");
-    fieldSummary = { fields: [], hasRepeater: false, totalFields: 0 };
+    analysis = { fields: [], fieldDetails: [], hasRepeater: false, totalFields: 0 };
   } else {
-    fieldSummary = summarizeFields(fieldsJson);
+    analysis = analyzeFields(fieldsJson);
   }
 
-  // meta.json — labels, tags, content type hints
-  const metaJson = await fetchJsonFile<MetaJson>(
-    accessToken,
-    `${modulePath}/meta.json`
-  );
+  const metaJson = await fetchJsonFile<MetaJson>(accessToken, `${modulePath}/meta.json`);
   const label =
     metaJson && typeof metaJson.label === "string" && metaJson.label.trim().length > 0
       ? metaJson.label.trim()
@@ -372,7 +401,6 @@ async function indexModule(
     ? (metaJson?.content_types as unknown[]).filter((t): t is string => typeof t === "string")
     : undefined;
 
-  // Structural classification
   const tags = classifyStructure(moduleName, label, metaTags);
 
   return {
@@ -380,9 +408,10 @@ async function indexModule(
     label,
     description,
     path: modulePath,
-    fields: fieldSummary.fields,
-    hasRepeater: fieldSummary.hasRepeater,
-    totalFields: fieldSummary.totalFields,
+    fields: analysis.fields,
+    fieldDetails: analysis.fieldDetails,
+    hasRepeater: analysis.hasRepeater,
+    totalFields: analysis.totalFields,
     tags,
     metaTags: metaTags.length > 0 ? metaTags : undefined,
     isGlobal,
@@ -392,7 +421,7 @@ async function indexModule(
 }
 
 // ============================================================
-// Top-level: index a whole theme
+// Top-level
 // ============================================================
 
 export async function indexTheme(
@@ -407,11 +436,7 @@ export async function indexTheme(
     scannedAt: new Date().toISOString(),
   };
 
-  // Step 1: list the contents of <theme>/modules
-  const modulesFolder = await fetchFolderMetadata(
-    accessToken,
-    `${themePath}/modules`
-  );
+  const modulesFolder = await fetchFolderMetadata(accessToken, `${themePath}/modules`);
 
   if (!modulesFolder) {
     result.warnings.push(
@@ -425,9 +450,6 @@ export async function indexTheme(
     return result;
   }
 
-  // Each child of /modules that ends in `.module` is a module folder.
-  // HubSpot modules use the `.module` suffix for their folder names — though
-  // we accept any folder as a fallback to handle non-standard themes.
   const moduleNames = modulesFolder.children.filter((child) => {
     if (typeof child !== "string") return false;
     if (child.startsWith(".") || child.startsWith("_")) return false;
@@ -439,12 +461,10 @@ export async function indexTheme(
     return result;
   }
 
-  // Step 2: index each module in parallel (with concurrency cap)
   const modules = await parallelLimit(moduleNames, MAX_CONCURRENCY, (name) =>
     indexModule(accessToken, themePath, name)
   );
 
-  // Sort by label for stable display
   modules.sort((a, b) => a.label.localeCompare(b.label));
 
   result.modules = modules;
