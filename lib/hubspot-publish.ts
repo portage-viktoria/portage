@@ -1,21 +1,57 @@
 /**
- * HubSpot publishing helpers — v5.
+ * HubSpot publishing helpers — v5 (corrected against real HubSpot page JSON).
  *
- * Final correct layoutSections shape, modeled directly after a real HubSpot
- * page's JSON response. See the diagnostic dump for reference.
+ * Module instance shape inside layoutSections — verified against a real
+ * HubSpot-generated page:
  *
- * Each module placement is a "custom_widget" type cell, with the module's
- * path AND its field values both living inside params. The module's identity
- * is the path string — module_id (a numeric HubSpot ID) is optional because
- * HubSpot auto-resolves the path.
+ *   {
+ *     "0": {
+ *       "name": "dnd_area-module-1",
+ *       "type": "custom_widget",
+ *       "path": "/Focus-child/modules/some-module",
+ *       "params": {
+ *         "css_class": "dnd-module",
+ *         "title": "...",
+ *         "text": "...",
+ *         "image": { "src": "...", "alt": "..." }
+ *       },
+ *       "cells": [],
+ *       "rows": [],
+ *       "rowMetaData": [],
+ *       "w": 12,
+ *       "x": 0
+ *     }
+ *   }
+ *
+ * Important rules from the real JSON:
+ *   - templatePath: NO leading slash (HubSpot rejects)
+ *   - module path inside layoutSections: KEEP leading slash (HubSpot stores it that way)
+ *   - module's field values go directly under params, flat
+ *   - css_class: "dnd-module" goes in params
+ *   - cells, rows, rowMetaData are empty arrays (still required as keys)
+ *   - w: 12, x: 0 for full-width single-column rows
  */
 
 import crypto from "crypto";
 
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
 
-function cleanPath(p: string): string {
+/**
+ * For templatePath — HubSpot rejects paths starting with /
+ */
+function cleanTemplatePath(p: string): string {
   return p.replace(/^\/+/, "").replace(/\/+$/, "");
+}
+
+/**
+ * For module paths inside layoutSections — HubSpot expects a leading /
+ * for theme-relative paths. We ensure it without doubling up.
+ */
+function ensureLeadingSlashForModule(p: string): string {
+  if (!p) return p;
+  if (p.startsWith("@")) return p;  // marketplace-style paths like @hubspot/rich_text
+  if (p.startsWith("/")) return p;
+  return `/${p}`;
 }
 
 // ============================================================
@@ -186,26 +222,15 @@ function resolveFieldValue(
       const img = section.content.images[isNaN(idx) ? 0 : idx];
       if (!img) return "";
       const finalUrl = imageUrlMap.get(img.src) ?? img.src;
-      // HubSpot's image field expects this shape
       return { src: finalUrl, alt: img.alt ?? "" };
     }
     case "link": {
       const idx = parseInt(mapping.value ?? "0", 10);
       const link = section.content.links[isNaN(idx) ? 0 : idx];
       if (!link) return null;
-      // Real HubSpot link field shape (from the dump):
-      // { url: { href, href_with_scheme, type }, no_follow, open_in_new_tab, ... }
       return {
-        url: {
-          href: link.href,
-          href_with_scheme: link.href,
-          type: "EXTERNAL",
-        },
-        no_follow: false,
-        open_in_new_tab: false,
-        rel: "",
-        sponsored: false,
-        user_generated_content: false,
+        url: { href: link.href, type: "EXTERNAL" },
+        button_text: link.text,
       };
     }
     case "literal":
@@ -217,31 +242,16 @@ function resolveFieldValue(
   }
 }
 
-/**
- * Build the params object for one module instance.
- *
- * The module's own field values live as flat keys alongside the boilerplate
- * (path, css_class, schema_version, etc.). This matches the real shape from
- * the HubSpot API response.
- */
 function buildModuleParams(
   section: ParsedSection,
   match: SectionMatch,
   imageUrlMap: Map<string, string>
 ): Record<string, unknown> {
-  // Boilerplate that every module cell carries
+  // Required base params for any drag-and-drop module instance
   const params: Record<string, unknown> = {
-    child_css: {},
-    css: {},
     css_class: "dnd-module",
-    path: match.matchedModulePath,
-    schema_version: 2,
-    smart_objects: [],
-    smart_type: "NOT_SMART",
-    wrap_field_tag: "div",
   };
 
-  // Field values, flattened directly into params
   for (const mapping of match.fieldMappings) {
     params[mapping.fieldName] = resolveFieldValue(mapping, section, imageUrlMap);
   }
@@ -250,7 +260,10 @@ function buildModuleParams(
 }
 
 // ============================================================
-// Build layoutSections — final correct shape
+// Build layoutSections
+//
+// One row per matched section. Each row has a single column at index "0"
+// containing the module instance directly (no extra wrapping cells).
 // ============================================================
 
 type LayoutPayload = {
@@ -272,42 +285,38 @@ function buildLayoutSections(
     if (!section) return;
 
     const params = buildModuleParams(section, match, imageUrlMap);
+    const moduleName = `dnd_area-module-${i + 1}`;
+    const modulePath = ensureLeadingSlashForModule(match.matchedModulePath);
 
-    // The module cell. type is "custom_widget", x=0 w=12 for full-width,
-    // params holds both the path and the field values.
-    const moduleCell = {
-      cells: [],
-      cssClass: "",
-      cssId: "",
-      cssStyle: "",
-      name: `dnd_area-module-${i + 1}`,
-      params,
-      rowMetaData: [],
-      rows: [],
+    // Module instance directly inside the row at column index "0"
+    const moduleInstance = {
+      name: moduleName,
       type: "custom_widget",
+      path: modulePath,
+      params,
+      cells: [],
+      rows: [],
+      rowMetaData: [],
       w: 12,
       x: 0,
     };
 
-    // Each row holds one full-width cell at column index "0"
-    rows.push({ "0": moduleCell });
+    rows.push({ "0": moduleInstance });
     rowMetaData.push({ cssClass: "dnd-section" });
   });
 
   return {
-    // The key MUST match the {% dnd_area "..." %} name in the template.
-    // Our migration.html uses {% dnd_area "dnd_area" %} so the key is "dnd_area".
     dnd_area: {
+      name: "dnd_area",
+      type: "cell",
+      label: "Main section",
       cells: [],
       cssClass: "",
       cssId: "",
       cssStyle: "",
-      label: "Main section",
-      name: "dnd_area",
       params: {},
       rowMetaData,
       rows,
-      type: "cell",
       w: 12,
       x: 0,
     },
@@ -338,9 +347,10 @@ export type CreatePageResult =
 export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePageResult> {
   const layoutSections = buildLayoutSections(args.sections, args.matches, args.imageUrlMap);
 
-  const cleanThemePath = cleanPath(args.themePath);
-  const cleanTemplate = cleanPath(args.templateName);
-  const templatePath = `${cleanThemePath}/templates/${cleanTemplate}`;
+  // templatePath: clean (no leading slash)
+  const cleanTheme = cleanTemplatePath(args.themePath);
+  const cleanTemplate = cleanTemplatePath(args.templateName);
+  const templatePath = `${cleanTheme}/templates/${cleanTemplate}`;
 
   const body: Record<string, unknown> = {
     name: args.pageTitle,
