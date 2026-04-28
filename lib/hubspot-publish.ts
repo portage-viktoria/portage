@@ -1,35 +1,15 @@
 /**
- * HubSpot publishing helpers — v6 (path INSIDE params, per real HubSpot JSON).
+ * HubSpot publishing helpers — v7 (Phase 4: defaults merging).
  *
- * Module instance shape inside layoutSections — verified against a real
- * HubSpot-generated page AND HubSpot's own developer AI guidance:
+ * Key change in v7: pull each module's `defaults` from the indexed catalog
+ * and merge our matcher's params ON TOP of those defaults. This ensures:
  *
- *   {
- *     "0": {
- *       "name": "dnd_area-module-1",
- *       "type": "custom_widget",
- *       "params": {
- *         "path": "/Focus-child/modules/some-module",  ← path is INSIDE params
- *         "schema_version": 2,
- *         "css_class": "dnd-module",
- *         "title": "...",
- *         "text": "...",
- *         "image": { "src": "...", "alt": "..." }
- *       },
- *       "cells": [],
- *       "rows": [],
- *       "rowMetaData": [],
- *       "w": 12,
- *       "x": 0
- *     }
- *   }
+ *   1. Required fields the module needs always have valid values
+ *   2. Modules render even when our matcher misses fields
+ *   3. We never break a module by sending only a subset of expected keys
  *
- * Critical rules:
- *   - templatePath: NO leading slash (HubSpot rejects)
- *   - module path inside params: KEEP leading slash for theme paths
- *   - module's field values go directly under params, flat
- *   - schema_version: 2 is REQUIRED (without it, the editor can't render)
- *   - css_class: "dnd-module" goes in params
+ * The public createHubSpotPage signature now accepts the catalog so we can
+ * look up each matched module's defaults at publish time.
  */
 
 import crypto from "crypto";
@@ -81,6 +61,15 @@ export type SectionMatch = {
   isFallback: boolean;
 };
 
+// Catalog entry needed by the publisher for defaults merging.
+// Matches the shape produced by indexer v3.
+export type CatalogModule = {
+  name: string;
+  path: string;
+  apiPath?: string;
+  defaults?: Record<string, unknown>;
+};
+
 // ============================================================
 // Tier detection
 // ============================================================
@@ -116,9 +105,7 @@ function inferFilename(url: string, fallback: string): string {
     const parsed = new URL(url);
     const pathPart = parsed.pathname.split("/").pop() ?? "";
     if (pathPart && pathPart.includes(".")) return pathPart;
-  } catch {
-    // ignore
-  }
+  } catch {}
   return fallback;
 }
 
@@ -221,42 +208,66 @@ function resolveFieldValue(
       const idx = parseInt(mapping.value ?? "0", 10);
       const link = section.content.links[isNaN(idx) ? 0 : idx];
       if (!link) return null;
-      // Format used by Focus-child's modules per the real page JSON
       return {
-        button_text: link.text,
-        button_link: {
-          url: { href: link.href, type: "EXTERNAL" },
-          no_follow: false,
-          open_in_new_tab: false,
-        },
+        url: { href: link.href, type: "EXTERNAL" },
+        no_follow: false,
+        open_in_new_tab: false,
       };
     }
     case "literal":
       return mapping.value ?? "";
     case "list":
+      // Repeater — empty array. The user adds items in the editor.
       return [];
     default:
       return "";
   }
 }
 
+/**
+ * Build the params for a single module instance.
+ *
+ * Algorithm:
+ *   1. Start with module's defaults from fields.json (if catalog provided)
+ *   2. Layer the matcher's resolved values on top, keyed by exact field name
+ *   3. Add base required keys (path, schema_version, css_class)
+ *
+ * Defaults guarantee that even fields the matcher doesn't touch have valid
+ * values, preventing the "module renders blank" failure mode.
+ */
 function buildModuleParams(
   section: ParsedSection,
   match: SectionMatch,
-  imageUrlMap: Map<string, string>
+  imageUrlMap: Map<string, string>,
+  catalogModule: CatalogModule | undefined
 ): Record<string, unknown> {
-  // Required base params for any drag-and-drop module instance
-  const params: Record<string, unknown> = {
-    path: ensureLeadingSlashForModule(match.matchedModulePath),
-    schema_version: 2,
-    css_class: "dnd-module",
-  };
+  // Start with defaults from the module's fields.json
+  const params: Record<string, unknown> =
+    catalogModule?.defaults ? deepClone(catalogModule.defaults) : {};
 
+  // Layer matcher's mapped values on top
   for (const mapping of match.fieldMappings) {
-    params[mapping.fieldName] = resolveFieldValue(mapping, section, imageUrlMap);
+    const resolved = resolveFieldValue(mapping, section, imageUrlMap);
+    // Skip null/undefined so we don't blow away a default with nothing
+    if (resolved === null || resolved === undefined) continue;
+    params[mapping.fieldName] = resolved;
   }
 
+  // Required base params for any drag-and-drop module instance
+  params.path = ensureLeadingSlashForModule(
+    catalogModule?.apiPath ?? match.matchedModulePath
+  );
+  params.schema_version = 2;
+  params.css_class = "dnd-module";
+
   return params;
+}
+
+/**
+ * Cheap deep clone for plain JSON values.
+ */
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
 }
 
 // ============================================================
@@ -270,10 +281,10 @@ type LayoutPayload = {
 function buildLayoutSections(
   sections: ParsedSection[],
   matches: SectionMatch[],
-  imageUrlMap: Map<string, string>
+  imageUrlMap: Map<string, string>,
+  catalogByName: Map<string, CatalogModule>
 ): LayoutPayload {
   const sectionById = new Map(sections.map((s) => [s.id, s]));
-
   const rows: Array<Record<string, unknown>> = [];
   const rowMetaData: Array<Record<string, unknown>> = [];
 
@@ -281,10 +292,10 @@ function buildLayoutSections(
     const section = sectionById.get(match.sectionId);
     if (!section) return;
 
-    const params = buildModuleParams(section, match, imageUrlMap);
+    const catalogModule = catalogByName.get(match.matchedModule);
+    const params = buildModuleParams(section, match, imageUrlMap, catalogModule);
     const moduleName = `dnd_area-module-${i + 1}`;
 
-    // Module instance directly inside the row at column index "0"
     const moduleInstance = {
       name: moduleName,
       type: "custom_widget",
@@ -333,6 +344,8 @@ export type CreatePageArgs = {
   matches: SectionMatch[];
   imageUrlMap: Map<string, string>;
   contentStagingState: "STAGING" | "DRAFT";
+  // NEW: catalog modules so we can look up defaults
+  catalog?: CatalogModule[];
 };
 
 export type CreatePageResult =
@@ -340,7 +353,16 @@ export type CreatePageResult =
   | { ok: false; error: string };
 
 export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePageResult> {
-  const layoutSections = buildLayoutSections(args.sections, args.matches, args.imageUrlMap);
+  const catalogByName = new Map<string, CatalogModule>(
+    (args.catalog ?? []).map((m) => [m.name, m])
+  );
+
+  const layoutSections = buildLayoutSections(
+    args.sections,
+    args.matches,
+    args.imageUrlMap,
+    catalogByName
+  );
 
   const cleanTheme = cleanTemplatePath(args.themePath);
   const cleanTemplate = cleanTemplatePath(args.templateName);

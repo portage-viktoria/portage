@@ -1,13 +1,8 @@
 /**
- * Publish endpoint — v2.
+ * Publish endpoint — updated for Phase 4.
  *
- * Adds template validation: before creating the HubSpot page, verify that
- * the project's configured template (default migration.html) actually exists
- * in the theme's /templates folder. If not, return a clear setup-issue error
- * rather than the cryptic "template not found" error from HubSpot.
- *
- * The template is configured per-project via the projects.template_name
- * column. Default is 'migration.html', set via SQL migration 005.
+ * Loads the theme catalog and passes it through to createHubSpotPage so
+ * each module's defaults can be merged with the matcher's params.
  */
 
 import { NextRequest, NextResponse } from "next/server";
@@ -19,6 +14,7 @@ import {
   detectStagingAvailable,
   ParsedSection,
   SectionMatch,
+  CatalogModule,
 } from "@/lib/hubspot-publish";
 import { logAudit } from "@/lib/audit";
 
@@ -43,16 +39,14 @@ function deriveDomainFromUrl(sourceUrl: string): string {
   }
 }
 
-/**
- * Verify the configured template actually exists in the theme.
- * Returns null if found, or an error message string if not.
- */
 async function validateTemplateExists(
   accessToken: string,
   themePath: string,
   templateName: string
 ): Promise<string | null> {
-  const fullPath = `${themePath}/templates/${templateName}`;
+  const cleanTheme = themePath.replace(/^\/+/, "").replace(/\/+$/, "");
+  const cleanTemplate = templateName.replace(/^\/+/, "").replace(/\/+$/, "");
+  const fullPath = `${cleanTheme}/templates/${cleanTemplate}`;
   const encodedPath = fullPath.split("/").map(encodeURIComponent).join("/");
   const url = `${HUBSPOT_API_BASE}/cms/v3/source-code/published/metadata/${encodedPath}`;
 
@@ -96,7 +90,6 @@ export async function POST(
   }
 
   const destination = body.destination === "STAGING" ? "STAGING" : "DRAFT";
-
   const supabase = createServiceClient();
 
   const { data: page, error: pageError } = await supabase
@@ -110,12 +103,8 @@ export async function POST(
   if (pageError || !page) {
     return NextResponse.json({ ok: false, error: "Page not found" }, { status: 404 });
   }
-
   if (!page.matches_json) {
-    return NextResponse.json(
-      { ok: false, error: "Page hasn't been matched yet" },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "Page hasn't been matched yet" }, { status: 400 });
   }
 
   const { data: project, error: projectError } = await supabase
@@ -133,18 +122,11 @@ export async function POST(
   try {
     accessToken = await getAccessToken(null, project.hub_id);
   } catch {
-    return NextResponse.json(
-      { ok: false, error: "Portal not connected" },
-      { status: 404 }
-    );
+    return NextResponse.json({ ok: false, error: "Portal not connected" }, { status: 404 });
   }
 
-  // Validate template before doing any expensive work
-  const templateError = await validateTemplateExists(
-    accessToken,
-    project.theme_path,
-    templateName
-  );
+  // Validate template exists before doing any expensive work
+  const templateError = await validateTemplateExists(accessToken, project.theme_path, templateName);
   if (templateError) {
     await supabase
       .from("migration_pages")
@@ -153,7 +135,6 @@ export async function POST(
     return NextResponse.json({ ok: false, error: templateError }, { status: 400 });
   }
 
-  // Tier check if user picked staging
   if (destination === "STAGING") {
     const stagingOk = await detectStagingAvailable(accessToken);
     if (!stagingOk) {
@@ -168,6 +149,40 @@ export async function POST(
     }
   }
 
+  // Load theme catalog so the publisher can merge module defaults
+  const { data: themeIndex } = await supabase
+    .from("theme_indexes")
+    .select("modules_json")
+    .eq("hub_id", project.hub_id)
+    .eq("theme_path", project.theme_path)
+    .maybeSingle();
+
+  type IndexedModule = {
+    name?: unknown;
+    path?: unknown;
+    apiPath?: unknown;
+    defaults?: unknown;
+  };
+
+  const rawModules: IndexedModule[] =
+    Array.isArray((themeIndex?.modules_json as { modules?: unknown })?.modules)
+      ? ((themeIndex?.modules_json as { modules: IndexedModule[] }).modules)
+      : [];
+
+  const catalog: CatalogModule[] = rawModules
+    .filter((m): m is IndexedModule & { name: string; path: string } =>
+      typeof m.name === "string" && typeof m.path === "string"
+    )
+    .map((m) => ({
+      name: m.name,
+      path: m.path,
+      apiPath: typeof m.apiPath === "string" ? m.apiPath : undefined,
+      defaults:
+        m.defaults && typeof m.defaults === "object"
+          ? (m.defaults as Record<string, unknown>)
+          : undefined,
+    }));
+
   await supabase
     .from("migration_pages")
     .update({ status: "publishing", status_message: null })
@@ -179,11 +194,9 @@ export async function POST(
     (page.matches_json as { sections?: SectionMatch[] })?.sections ?? [];
 
   const sourceDomain = deriveDomainFromUrl(page.source_url);
-  const pageTitle =
-    body.pageTitle?.trim() || page.page_title || "Untitled migrated page";
+  const pageTitle = body.pageTitle?.trim() || page.page_title || "Untitled migrated page";
   const pageSlug = body.pageSlug?.trim() || deriveSlugFromUrl(page.source_url);
-  const metaDescription =
-    body.metaDescription?.trim() || page.page_description || "";
+  const metaDescription = body.metaDescription?.trim() || page.page_description || "";
 
   let imageUrlMap: Map<string, string>;
   try {
@@ -208,6 +221,7 @@ export async function POST(
     matches,
     imageUrlMap,
     contentStagingState: destination,
+    catalog,
   });
 
   if (!result.ok) {
