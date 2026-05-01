@@ -65,7 +65,8 @@ export async function POST(
         hub_id: hubId,
         theme_path: themePath,
         modules_json: indexResult,
-        scanned_at: new Date().toISOString(),
+        module_count: indexResult.moduleCount,
+        indexed_at: new Date().toISOString(),
       },
       { onConflict: "hub_id,theme_path" }
     );
