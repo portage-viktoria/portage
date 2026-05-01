@@ -8,19 +8,12 @@
  *      b. If no rule (or pattern == rich-text-fallback) → rich text fallback (no Claude call)
  *      c. Else: run field mapping for that one section, with the module's
  *         HubL render summary in the prompt
- *
- * The render summary tells Claude where each field actually renders, which
- * fixes the "section heading goes into rich text body" bug — Claude can
- * see that the body field renders inside <div class="rich-content"> while
- * the title field renders inside <h1>, so they're not interchangeable.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { callAnthropic, extractText, parseJsonResponse } from "./anthropic";
 import { classifySections, type ParsedSection, type SectionPatternResult } from "./section-classifier-v2";
 import { resolvePatternToModule, type Rulebook } from "./rulebook";
 import type { SectionPattern } from "./patterns";
-
-const MODEL = "claude-haiku-4-5-20251001";
 
 const RICH_TEXT_MODULE_NAME = "@hubspot/rich_text";
 const RICH_TEXT_API_PATH = "@hubspot/rich_text";
@@ -44,7 +37,6 @@ export type SectionMatch = {
   isFallback: boolean;
 };
 
-// Catalog entry shape this matcher needs (subset of full ModuleEntry)
 export type CatalogEntry = {
   name: string;
   label?: string;
@@ -77,12 +69,9 @@ function summarizeSectionForMapping(s: ParsedSection) {
 }
 
 async function mapFieldsWithRenderContext(
-  apiKey: string,
   section: ParsedSection,
   module: CatalogEntry
 ): Promise<{ mappings: FieldMapping[]; reasoning: string }> {
-  const client = new Anthropic({ apiKey });
-
   const sectionSummary = summarizeSectionForMapping(section);
   const fieldDetails = module.fieldDetails ?? [];
 
@@ -133,22 +122,24 @@ Return strictly this JSON shape, no preamble:
   "mappings": [ { fieldName, fieldType, source, value?, description }, ... ]
 }`;
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 2000,
-    messages: [{ role: "user", content: prompt }],
-  });
+  let response;
+  try {
+    response = await callAnthropic({
+      maxTokens: 2000,
+      messages: [{ role: "user", content: prompt }],
+    });
+  } catch (err) {
+    return {
+      mappings: [],
+      reasoning: `Field mapping call failed: ${(err as Error).message}`,
+    };
+  }
 
-  const text = response.content
-    .filter((b): b is { type: "text"; text: string } => b.type === "text")
-    .map((b) => b.text)
-    .join("\n");
-
-  const cleaned = text.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
+  const text = extractText(response);
 
   let parsed: { reasoning?: string; mappings?: FieldMapping[] };
   try {
-    parsed = JSON.parse(cleaned);
+    parsed = parseJsonResponse<{ reasoning?: string; mappings?: FieldMapping[] }>(text);
   } catch {
     return {
       mappings: [],
@@ -194,7 +185,7 @@ function buildRichTextFallback(section: ParsedSection, pattern: SectionPattern, 
 // ============================================================
 
 export type MatchPageArgs = {
-  apiKey: string;
+  apiKey: string; // kept for compatibility; callAnthropic reads env directly
   sections: ParsedSection[];
   catalog: CatalogEntry[];
   rulebook: Rulebook | null;
@@ -215,13 +206,12 @@ export async function matchPageWithRulebook(args: MatchPageArgs): Promise<MatchP
 
   const catalogByName = new Map(catalog.map((m) => [m.name, m]));
 
-  // Step 2: process each section sequentially (per-section field mapping)
+  // Step 2: process each section sequentially
   const matches: SectionMatch[] = [];
   for (const section of sections) {
     const patternResult = patternBySection.get(section.id);
     const pattern: SectionPattern = patternResult?.pattern ?? "rich-text-fallback";
 
-    // Rich text fallback short-circuit
     if (pattern === "rich-text-fallback") {
       matches.push(
         buildRichTextFallback(
@@ -233,7 +223,6 @@ export async function matchPageWithRulebook(args: MatchPageArgs): Promise<MatchP
       continue;
     }
 
-    // Look up the rulebook
     const moduleName = resolvePatternToModule(rulebook, pattern);
     if (!moduleName) {
       matches.push(
@@ -258,10 +247,9 @@ export async function matchPageWithRulebook(args: MatchPageArgs): Promise<MatchP
       continue;
     }
 
-    // Run field mapping for this section against the canonical module
     let mappingResult;
     try {
-      mappingResult = await mapFieldsWithRenderContext(apiKey, section, module);
+      mappingResult = await mapFieldsWithRenderContext(section, module);
     } catch (err) {
       matches.push(
         buildRichTextFallback(

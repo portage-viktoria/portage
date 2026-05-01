@@ -9,10 +9,8 @@
  * rulebook to look up the canonical module for that pattern.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { callAnthropic, extractText, parseJsonResponse } from "./anthropic";
 import { PATTERNS, PATTERN_IDS, type SectionPattern } from "./patterns";
-
-const MODEL = "claude-haiku-4-5-20251001";
 
 export type ParsedSection = {
   id: string;
@@ -49,12 +47,10 @@ function summarizeSection(s: ParsedSection) {
 }
 
 export async function classifySections(
-  apiKey: string,
+  _apiKey: string, // kept for compatibility; callAnthropic reads env directly
   sections: ParsedSection[]
 ): Promise<SectionPatternResult[]> {
   if (sections.length === 0) return [];
-
-  const client = new Anthropic({ apiKey });
 
   const summaries = sections.map(summarizeSection);
 
@@ -82,24 +78,28 @@ Return strictly this JSON shape, no preamble or commentary:
   ]
 }`;
 
-  const response = await client.messages.create({
-    model: MODEL,
-    max_tokens: 4000,
-    messages: [{ role: "user", content: prompt }],
-  });
+  let response;
+  try {
+    response = await callAnthropic({
+      maxTokens: 4000,
+      messages: [{ role: "user", content: prompt }],
+    });
+  } catch {
+    // Couldn't reach Claude — assign rich-text-fallback to all
+    return sections.map((s) => ({
+      sectionId: s.id,
+      pattern: "rich-text-fallback" as SectionPattern,
+      confidence: 0.0,
+      reasoning: "Classification call failed",
+    }));
+  }
 
-  const text = response.content
-    .filter((b): b is { type: "text"; text: string } => b.type === "text")
-    .map((b) => b.text)
-    .join("\n");
-
-  const cleaned = text.replace(/^```(?:json)?/m, "").replace(/```$/m, "").trim();
+  const text = extractText(response);
 
   let parsed: { sections?: SectionPatternResult[] };
   try {
-    parsed = JSON.parse(cleaned);
+    parsed = parseJsonResponse<{ sections?: SectionPatternResult[] }>(text);
   } catch {
-    // Couldn't parse — assign rich-text-fallback to all
     return sections.map((s) => ({
       sectionId: s.id,
       pattern: "rich-text-fallback" as SectionPattern,
@@ -108,7 +108,6 @@ Return strictly this JSON shape, no preamble or commentary:
     }));
   }
 
-  // Validate each result and fill in any missing
   const validPatterns = new Set<string>(PATTERN_IDS);
   const results: SectionPatternResult[] = [];
   for (const s of sections) {
