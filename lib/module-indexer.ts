@@ -1,85 +1,42 @@
 /**
- * Module indexer — v3 (Phase 1).
+ * Module indexer — v4 (rulebook patch).
  *
- * Captures everything the publisher and matcher need to work generically
- * across any HubSpot theme:
+ * Adds on top of v3:
+ *   - Fetches module.html for each module
+ *   - Extracts a render summary using hubl-extractor
+ *   - Stores both the raw template (truncated) and the summary in the catalog entry
  *
- *   1. Full field tree with names, types, labels, defaults, and nesting
- *   2. Group/repeater structure so params can mirror it correctly
- *   3. Module defaults — all default values, ready to merge with our params
- *   4. Type signature for structural matching (counts of normalized types)
- *   5. content_types filter — only modules valid for SITE_PAGE are kept
- *
- * Backwards compatible with v2:
- *   - `fields` aggregate summary kept for any UI that relied on it
- *   - `fieldDetails` kept (with same shape) so the v3 matcher still works
- *   - New: `fieldSchema` (full tree), `defaults` (merged values), `signature`
+ * The render summary is what powers smarter field mapping in the matcher —
+ * Claude can see "title renders as h1" and avoid putting heading text in
+ * a body field.
  */
+
+import { extractRenderSummary, formatRenderSummary, type RenderSummary } from "./hubl-extractor";
 
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
 const MAX_CONCURRENCY = 5;
+// Cap raw HubL stored per module to keep theme_indexes row size reasonable.
+// Render summary (which is much smaller) is the primary input to the matcher.
+const MAX_HUBL_STORED_CHARS = 8000;
 
 // ============================================================
-// Normalized field categories
-// Maps HubSpot's 30+ field types into a smaller set we can reason about
+// Normalized field categories (unchanged from v3)
 // ============================================================
 
 export type FieldCategory =
-  | "text"           // text, plain string content
-  | "richtext"       // richtext (HTML body)
-  | "image"          // image
-  | "background"     // backgroundimage (style field)
-  | "link"           // link, url, cta
-  | "choice"         // choice, boolean
-  | "color"          // color, gradient
-  | "number"         // number
-  | "icon"           // icon
-  | "embed"          // embed, video
-  | "form"           // form
-  | "menu"           // menu, simplemenu
-  | "spacing"        // spacing, border, alignment, font
-  | "data"           // hubdbtable, hubdbrow, blog, page, crmobject, crmobjectproperty, tag, file, date, datetime, email
-  | "repeater"       // group with occurrence > 1
-  | "group"          // group with occurrence == 1 (just nesting)
-  | "other";
+  | "text" | "richtext" | "image" | "background" | "link" | "choice"
+  | "color" | "number" | "icon" | "embed" | "form" | "menu" | "spacing"
+  | "data" | "repeater" | "group" | "other";
 
 const TYPE_TO_CATEGORY: Record<string, FieldCategory> = {
-  text: "text",
-  richtext: "richtext",
-  image: "image",
-  backgroundimage: "background",
-  link: "link",
-  url: "link",
-  cta: "link",
-  choice: "choice",
-  boolean: "choice",
-  color: "color",
-  gradient: "color",
-  number: "number",
-  icon: "icon",
-  embed: "embed",
-  video: "embed",
-  form: "form",
-  menu: "menu",
-  simplemenu: "menu",
-  spacing: "spacing",
-  border: "spacing",
-  alignment: "spacing",
-  textalignment: "spacing",
-  font: "spacing",
-  hubdbtable: "data",
-  hubdbrow: "data",
-  blog: "data",
-  page: "data",
-  crmobject: "data",
-  crmobjectproperty: "data",
-  tag: "data",
-  file: "data",
-  date: "data",
-  datetime: "data",
-  email: "data",
-  followupemail: "data",
-  logo: "image",
+  text: "text", richtext: "richtext", image: "image", backgroundimage: "background",
+  link: "link", url: "link", cta: "link", choice: "choice", boolean: "choice",
+  color: "color", gradient: "color", number: "number", icon: "icon",
+  embed: "embed", video: "embed", form: "form", menu: "menu", simplemenu: "menu",
+  spacing: "spacing", border: "spacing", alignment: "spacing", textalignment: "spacing", font: "spacing",
+  hubdbtable: "data", hubdbrow: "data", blog: "data", page: "data",
+  crmobject: "data", crmobjectproperty: "data", tag: "data", file: "data",
+  date: "data", datetime: "data", email: "data", followupemail: "data", logo: "image",
 };
 
 function categorize(type: string): FieldCategory {
@@ -97,22 +54,17 @@ export type FieldNode = {
   category: FieldCategory;
   required: boolean;
   default: unknown;
-  // For groups (and repeaters): the children, in order
   children?: FieldNode[];
-  // True if this is a group with occurrence allowing > 1 entry
   isRepeater: boolean;
-  // For repeaters: the default value of one item (children's defaults)
   itemDefault?: Record<string, unknown>;
 };
 
-// Aggregate summary kept for backwards compat
 export type FieldSummary = {
   type: string;
   category: FieldCategory;
   count: number;
 };
 
-// Per-field detail kept for backwards compat (used by current matcher)
 export type FieldDetail = {
   name: string;
   label: string;
@@ -122,7 +74,6 @@ export type FieldDetail = {
   childFields?: Array<{ name: string; type: string; category: FieldCategory }>;
 };
 
-// Type signature — used for structural matching in Phase 3
 export type TypeSignature = {
   text: number;
   richtext: number;
@@ -130,39 +81,26 @@ export type TypeSignature = {
   link: number;
   repeaterCount: number;
   repeaterMaxChildren: number;
-  totalContentFields: number; // text + richtext + image + link + repeater
-  // includes ALL field types so we can see total complexity
+  totalContentFields: number;
   totalFields: number;
 };
 
 export type StructuralTag =
-  | "hero"
-  | "accordion"
-  | "tabs"
-  | "card-grid"
-  | "feature-list"
-  | "cta-banner"
-  | "testimonial"
-  | "logo-strip"
-  | "stats"
-  | "gallery"
-  | "form"
-  | "rich-text"
-  | "menu"
-  | "blog-listing"
-  | "unknown";
+  | "hero" | "accordion" | "tabs" | "card-grid" | "feature-list"
+  | "cta-banner" | "testimonial" | "logo-strip" | "stats" | "gallery"
+  | "form" | "rich-text" | "menu" | "blog-listing" | "unknown";
 
 export type ModuleEntry = {
   name: string;
   label: string;
   description?: string;
-  path: string;                  // path WITH .module suffix as on disk
-  apiPath: string;               // path WITHOUT .module — used in HubSpot params
-  fields: FieldSummary[];        // backwards-compat aggregate
-  fieldDetails: FieldDetail[];   // backwards-compat per-field summary
-  fieldSchema: FieldNode[];      // NEW: full tree with defaults
-  defaults: Record<string, unknown>; // NEW: full default params for the module
-  signature: TypeSignature;      // NEW: for structural matching
+  path: string;
+  apiPath: string;
+  fields: FieldSummary[];
+  fieldDetails: FieldDetail[];
+  fieldSchema: FieldNode[];
+  defaults: Record<string, unknown>;
+  signature: TypeSignature;
   hasRepeater: boolean;
   totalFields: number;
   tags: StructuralTag[];
@@ -170,6 +108,10 @@ export type ModuleEntry = {
   isGlobal?: boolean;
   contentTypes?: string[];
   warnings: string[];
+  // NEW in v4:
+  renderSummary?: RenderSummary;        // structured data
+  renderSummaryText?: string;           // formatted for prompt inclusion
+  hublExcerpt?: string;                 // raw HubL, truncated
 };
 
 export type IndexResult = {
@@ -185,9 +127,7 @@ export type IndexResult = {
 // ============================================================
 
 async function parallelLimit<T, R>(
-  items: T[],
-  limit: number,
-  task: (item: T) => Promise<R>
+  items: T[], limit: number, task: (item: T) => Promise<R>
 ): Promise<R[]> {
   const results: R[] = new Array(items.length);
   let cursor = 0;
@@ -219,15 +159,11 @@ type FolderMetadata = {
 };
 
 async function fetchFolderMetadata(
-  accessToken: string,
-  path: string
+  accessToken: string, path: string
 ): Promise<FolderMetadata | null> {
   const url = `${HUBSPOT_API_BASE}/cms/v3/source-code/published/metadata/${encodePath(path)}`;
   const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/json",
-    },
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json" },
   });
   if (!res.ok) return null;
   try {
@@ -240,10 +176,7 @@ async function fetchFolderMetadata(
 async function fetchTextFile(accessToken: string, path: string): Promise<string | null> {
   const url = `${HUBSPOT_API_BASE}/cms/v3/source-code/published/content/${encodePath(path)}`;
   const res = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Accept: "application/octet-stream",
-    },
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/octet-stream" },
   });
   if (!res.ok) return null;
   try {
@@ -254,8 +187,7 @@ async function fetchTextFile(accessToken: string, path: string): Promise<string 
 }
 
 async function fetchJsonFile<T = unknown>(
-  accessToken: string,
-  path: string
+  accessToken: string, path: string
 ): Promise<T | null> {
   const text = await fetchTextFile(accessToken, path);
   if (text === null) return null;
@@ -268,7 +200,7 @@ async function fetchJsonFile<T = unknown>(
 }
 
 // ============================================================
-// fields.json parsing — extracts the full tree
+// fields.json parsing (unchanged from v3)
 // ============================================================
 
 type RawFieldNode = {
@@ -291,12 +223,9 @@ function parseFieldNode(raw: RawFieldNode): FieldNode | null {
   const required = raw.required === true;
   const category = categorize(type);
 
-  // Group handling — recurse
   if (type === "group") {
     const occ = raw.occurrence;
-    const isRepeater =
-      !!occ && (occ.max === undefined || (typeof occ.max === "number" && occ.max > 1));
-
+    const isRepeater = !!occ && (occ.max === undefined || (typeof occ.max === "number" && occ.max > 1));
     const children: FieldNode[] = [];
     if (Array.isArray(raw.children)) {
       for (const c of raw.children) {
@@ -304,51 +233,30 @@ function parseFieldNode(raw: RawFieldNode): FieldNode | null {
         if (parsed) children.push(parsed);
       }
     }
-
-    // For repeaters: build a single-item default from children's defaults
     let itemDefault: Record<string, unknown> | undefined;
     if (isRepeater) {
       itemDefault = {};
-      for (const child of children) {
-        itemDefault[child.name] = child.default;
-      }
+      for (const child of children) itemDefault[child.name] = child.default;
     }
-
-    // Default for the group itself
     let groupDefault: unknown;
     if (isRepeater) {
-      // Repeater default is array of items if specified
       groupDefault = Array.isArray(raw.default) ? raw.default : [];
     } else {
-      // Non-repeating group: nested object of children's defaults
       const obj: Record<string, unknown> = {};
-      for (const child of children) {
-        obj[child.name] = child.default;
-      }
+      for (const child of children) obj[child.name] = child.default;
       groupDefault = obj;
     }
-
     return {
-      name,
-      label,
-      type,
+      name, label, type,
       category: isRepeater ? "repeater" : "group",
-      required,
-      default: groupDefault,
-      children,
-      isRepeater,
-      itemDefault,
+      required, default: groupDefault,
+      children, isRepeater, itemDefault,
     };
   }
 
   return {
-    name,
-    label,
-    type,
-    category,
-    required,
-    default: raw.default,
-    isRepeater: false,
+    name, label, type, category, required,
+    default: raw.default, isRepeater: false,
   };
 }
 
@@ -363,40 +271,21 @@ function parseFieldsJson(rawJson: unknown): FieldNode[] {
 }
 
 // ============================================================
-// Derive defaults, signature, and back-compat structures from the schema
+// Derived data (unchanged from v3)
 // ============================================================
 
-/**
- * Build a flat defaults object: { fieldName: defaultValue, ... }
- * For nested groups, the default is a nested object.
- * For repeaters, the default is an array (usually empty).
- */
 function buildDefaults(schema: FieldNode[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const node of schema) {
-    out[node.name] = node.default;
-  }
+  for (const node of schema) out[node.name] = node.default;
   return out;
 }
 
-/**
- * Compute a type signature by walking the schema.
- * Top-level fields contribute to the count. Repeaters contribute their
- * child counts to repeaterMaxChildren so we can identify "card grid"-style
- * modules where the action is in the repeater.
- */
 function buildSignature(schema: FieldNode[]): TypeSignature {
   const sig: TypeSignature = {
-    text: 0,
-    richtext: 0,
-    image: 0,
-    link: 0,
-    repeaterCount: 0,
-    repeaterMaxChildren: 0,
-    totalContentFields: 0,
-    totalFields: 0,
+    text: 0, richtext: 0, image: 0, link: 0,
+    repeaterCount: 0, repeaterMaxChildren: 0,
+    totalContentFields: 0, totalFields: 0,
   };
-
   function add(category: FieldCategory) {
     sig.totalFields += 1;
     if (category === "text") sig.text += 1;
@@ -405,23 +294,16 @@ function buildSignature(schema: FieldNode[]): TypeSignature {
     else if (category === "link") sig.link += 1;
     else if (category === "repeater") sig.repeaterCount += 1;
   }
-
   for (const node of schema) {
     add(node.category);
     if (node.isRepeater && Array.isArray(node.children)) {
       sig.repeaterMaxChildren = Math.max(sig.repeaterMaxChildren, node.children.length);
     }
   }
-
-  sig.totalContentFields =
-    sig.text + sig.richtext + sig.image + sig.link + sig.repeaterCount;
-
+  sig.totalContentFields = sig.text + sig.richtext + sig.image + sig.link + sig.repeaterCount;
   return sig;
 }
 
-/**
- * Backwards-compat: aggregate field summary by category.
- */
 function buildSummary(schema: FieldNode[]): FieldSummary[] {
   const counts = new Map<FieldCategory, { count: number; rawTypes: Set<string> }>();
   function walk(nodes: FieldNode[]) {
@@ -437,7 +319,6 @@ function buildSummary(schema: FieldNode[]): FieldSummary[] {
     }
   }
   walk(schema);
-
   const out: FieldSummary[] = Array.from(counts.entries()).map(([cat, info]) => ({
     type: Array.from(info.rawTypes).join(", "),
     category: cat,
@@ -447,30 +328,20 @@ function buildSummary(schema: FieldNode[]): FieldSummary[] {
   return out;
 }
 
-/**
- * Backwards-compat: flat per-field detail array.
- */
 function buildFieldDetails(schema: FieldNode[]): FieldDetail[] {
   const out: FieldDetail[] = [];
   for (const n of schema) {
     if (n.category === "group" && Array.isArray(n.children)) {
-      // Non-repeating group: emit children
       for (const c of n.children) {
         out.push({
-          name: `${n.name}.${c.name}`,
-          label: c.label,
-          type: c.type,
-          category: c.category,
-          isRepeater: false,
+          name: `${n.name}.${c.name}`, label: c.label, type: c.type,
+          category: c.category, isRepeater: false,
         });
       }
       continue;
     }
     out.push({
-      name: n.name,
-      label: n.label,
-      type: n.type,
-      category: n.category,
+      name: n.name, label: n.label, type: n.type, category: n.category,
       isRepeater: n.isRepeater,
       childFields: n.isRepeater && Array.isArray(n.children)
         ? n.children.map((c) => ({ name: c.name, type: c.type, category: c.category }))
@@ -481,7 +352,7 @@ function buildFieldDetails(schema: FieldNode[]): FieldDetail[] {
 }
 
 // ============================================================
-// Structural classification
+// Structural tags (unchanged from v3)
 // ============================================================
 
 const NAME_PATTERNS: Array<[RegExp, StructuralTag]> = [
@@ -512,7 +383,7 @@ function classifyStructure(name: string, label: string, metaTags: string[]): Str
 }
 
 // ============================================================
-// Single-module indexer
+// Single-module indexer (UPDATED for v4)
 // ============================================================
 
 type MetaJson = {
@@ -530,14 +401,18 @@ function stripModuleSuffix(p: string): string {
 }
 
 async function indexModule(
-  accessToken: string,
-  themePath: string,
-  moduleName: string
+  accessToken: string, themePath: string, moduleName: string
 ): Promise<ModuleEntry | null> {
   const modulePath = `${themePath}/modules/${moduleName}`;
   const warnings: string[] = [];
 
-  const fieldsJson = await fetchJsonFile<unknown>(accessToken, `${modulePath}/fields.json`);
+  // Fetch fields.json, meta.json, AND module.html in parallel
+  const [fieldsJson, metaJson, hublRaw] = await Promise.all([
+    fetchJsonFile<unknown>(accessToken, `${modulePath}/fields.json`),
+    fetchJsonFile<MetaJson>(accessToken, `${modulePath}/meta.json`),
+    fetchTextFile(accessToken, `${modulePath}/module.html`),
+  ]);
+
   let schema: FieldNode[] = [];
   if (fieldsJson === null) {
     warnings.push("fields.json missing or unreadable");
@@ -545,7 +420,21 @@ async function indexModule(
     schema = parseFieldsJson(fieldsJson);
   }
 
-  const metaJson = await fetchJsonFile<MetaJson>(accessToken, `${modulePath}/meta.json`);
+  // Extract render summary from HubL if available
+  let renderSummary: RenderSummary | undefined;
+  let renderSummaryText: string | undefined;
+  let hublExcerpt: string | undefined;
+  if (hublRaw && hublRaw.length > 0) {
+    try {
+      renderSummary = extractRenderSummary(hublRaw);
+      renderSummaryText = formatRenderSummary(renderSummary);
+      hublExcerpt = hublRaw.slice(0, MAX_HUBL_STORED_CHARS);
+    } catch (err) {
+      warnings.push(`HubL extraction failed: ${(err as Error).message}`);
+    }
+  } else {
+    warnings.push("module.html missing or empty");
+  }
 
   const label =
     metaJson && typeof metaJson.label === "string" && metaJson.label.trim().length > 0
@@ -567,13 +456,9 @@ async function indexModule(
     ? (metaJson?.content_types as unknown[]).filter((t): t is string => typeof t === "string")
     : undefined;
 
-  // Filter: only modules valid for SITE_PAGE (or where content_types is unspecified
-  // — many themes leave it open which means "any type")
   if (contentTypes && contentTypes.length > 0 && !contentTypes.includes("SITE_PAGE")) {
     return null;
   }
-
-  // Skip modules that aren't available for new content
   if (metaJson?.is_available_for_new_content === false) {
     return null;
   }
@@ -587,10 +472,9 @@ async function indexModule(
 
   return {
     name: moduleName,
-    label,
-    description,
-    path: modulePath,                              // with .module suffix
-    apiPath: stripModuleSuffix(modulePath),        // without .module suffix — for HubSpot API
+    label, description,
+    path: modulePath,
+    apiPath: stripModuleSuffix(modulePath),
     fields: summary,
     fieldDetails,
     fieldSchema: schema,
@@ -603,6 +487,9 @@ async function indexModule(
     isGlobal,
     contentTypes,
     warnings,
+    renderSummary,
+    renderSummaryText,
+    hublExcerpt,
   };
 }
 
@@ -611,8 +498,7 @@ async function indexModule(
 // ============================================================
 
 export async function indexTheme(
-  accessToken: string,
-  themePath: string
+  accessToken: string, themePath: string
 ): Promise<IndexResult> {
   const result: IndexResult = {
     themePath,
@@ -651,7 +537,6 @@ export async function indexTheme(
     indexModule(accessToken, themePath, name)
   );
 
-  // Filter out modules that returned null (filtered by content_types)
   const modules = indexed.filter((m): m is ModuleEntry => m !== null);
   modules.sort((a, b) => a.label.localeCompare(b.label));
 

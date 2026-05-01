@@ -1,154 +1,44 @@
 /**
- * Match endpoint.
+ * Match endpoint — v2 with rulebook integration.
  *
- * POST /api/projects/[projectId]/pages/[pageId]/match
+ * Flow:
+ *   1. Load page + project + theme catalog (with HubL render summaries)
+ *   2. Try to load a rulebook for the theme
+ *   3. If rulebook exists: run new rulebook-aware matcher
+ *      Otherwise: return early with hint that no rulebook is set up
  *
- * Loads the page's classifications + the project's theme catalog, runs the
- * module matcher per section, stores results in matches_json, status->matched.
+ * The "no rulebook" response gives the client a structured signal so it
+ * can show the "Set up rulebook" prompt instead of bad matches.
  *
- * If the theme isn't indexed yet (e.g., the project was created before the
- * auto-indexing fix), this route will index it inline as a fallback — so
- * existing projects "just work" without the user needing to detour anywhere.
+ * Force the old matcher with ?force=legacy to bypass the rulebook check.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase";
-import { getAccessToken } from "@/lib/portal-connections";
-import { indexTheme } from "@/lib/module-indexer";
-import {
-  matchSections,
-  MatcherInputSection,
-  CatalogModule,
-} from "@/lib/module-matcher";
+import { matchPageWithRulebook, type CatalogEntry } from "@/lib/rulebook-matcher";
+import { loadRulebook } from "@/lib/rulebook";
 import { logAudit } from "@/lib/audit";
-
-type ParsedJson = {
-  sections: Array<{
-    id: string;
-    content: {
-      heading?: string;
-      text: string;
-      headings: Array<{ level: number; text: string }>;
-      images: Array<{ src: string; alt?: string }>;
-      links: Array<{ text: string; href: string }>;
-      wordCount: number;
-    };
-  }>;
-};
-
-type ClassificationsJson = {
-  sections: Array<{
-    id: string;
-    type: string;
-    confidence: number;
-    reasoning?: string;
-  }>;
-};
-
-type ThemeIndexJson = {
-  modules: CatalogModule[];
-};
-
-/**
- * Get or create the theme catalog. If already cached, returns it. If not,
- * indexes the theme inline and caches it.
- */
-async function getOrIndexThemeCatalog(
-  hubId: number,
-  themePath: string
-): Promise<{ ok: true; catalog: CatalogModule[] } | { ok: false; error: string }> {
-  const supabase = createServiceClient();
-
-  // Try cache first
-  const { data: existing } = await supabase
-    .from("theme_indexes")
-    .select("modules_json")
-    .eq("hub_id", hubId)
-    .eq("theme_path", themePath)
-    .maybeSingle();
-
-  if (existing) {
-    const catalog = (existing.modules_json as ThemeIndexJson).modules ?? [];
-    if (catalog.length > 0) {
-      return { ok: true, catalog };
-    }
-    // Cached but empty — fall through and re-index
-  }
-
-  // Not cached or empty cache — index now
-  let accessToken: string;
-  try {
-    accessToken = await getAccessToken(null, hubId);
-  } catch {
-    return {
-      ok: false,
-      error: "Portal not connected — can't index theme.",
-    };
-  }
-
-  let result;
-  try {
-    result = await indexTheme(accessToken, themePath);
-  } catch (err) {
-    return {
-      ok: false,
-      error: `Couldn't index theme: ${(err as Error).message}`,
-    };
-  }
-
-  if (result.moduleCount === 0) {
-    return {
-      ok: false,
-      error:
-        "Theme has no readable modules. If this is a child theme of a marketplace " +
-        "theme, you may need to clone the parent's modules into the child first.",
-    };
-  }
-
-  // Cache the result for future calls
-  await supabase.from("theme_indexes").upsert(
-    {
-      hub_id: hubId,
-      theme_path: themePath,
-      modules_json: result,
-      module_count: result.moduleCount,
-      indexed_at: result.scannedAt,
-    },
-    { onConflict: "hub_id,theme_path" }
-  );
-
-  return { ok: true, catalog: result.modules };
-}
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ projectId: string; pageId: string }> }
 ) {
   const { projectId, pageId } = await params;
+  const url = new URL(request.url);
+  const force = url.searchParams.get("force"); // "legacy" or "rulebook" or null
+
   const supabase = createServiceClient();
 
-  // Load page with classifications
   const { data: page, error: pageError } = await supabase
     .from("migration_pages")
-    .select("id, project_id, parsed_json, classifications_json, status")
+    .select("id, project_id, parsed_json, status")
     .eq("project_id", projectId)
     .eq("id", pageId)
     .maybeSingle();
-
   if (pageError || !page) {
     return NextResponse.json({ ok: false, error: "Page not found" }, { status: 404 });
   }
-  if (!page.parsed_json) {
-    return NextResponse.json({ ok: false, error: "Page hasn't been parsed yet" }, { status: 400 });
-  }
-  if (!page.classifications_json) {
-    return NextResponse.json(
-      { ok: false, error: "Page hasn't been classified yet" },
-      { status: 400 }
-    );
-  }
 
-  // Load project to get theme path + portal
   const { data: project, error: projectError } = await supabase
     .from("projects")
     .select("hub_id, theme_path")
@@ -158,48 +48,97 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "Project not found" }, { status: 404 });
   }
 
-  // Get or build theme catalog (auto-index if missing)
-  const catalogResult = await getOrIndexThemeCatalog(project.hub_id, project.theme_path);
-  if (!catalogResult.ok) {
+  // Load catalog
+  const { data: themeIndex } = await supabase
+    .from("theme_indexes")
+    .select("modules_json")
+    .eq("hub_id", project.hub_id)
+    .eq("theme_path", project.theme_path)
+    .maybeSingle();
+
+  if (!themeIndex) {
     return NextResponse.json(
-      { ok: false, error: catalogResult.error },
+      {
+        ok: false,
+        error: "Theme not indexed yet — re-index the theme before matching",
+      },
       { status: 400 }
     );
   }
-  const catalog = catalogResult.catalog;
 
-  // Build matcher inputs by joining parsed sections with classifications
-  const parsedJson = page.parsed_json as ParsedJson;
-  const classifications = (page.classifications_json as ClassificationsJson).sections ?? [];
-  const classificationById = new Map(classifications.map((c) => [c.id, c]));
+  type IndexedModule = {
+    name?: unknown;
+    label?: unknown;
+    path?: unknown;
+    apiPath?: unknown;
+    fieldDetails?: unknown;
+    renderSummaryText?: unknown;
+  };
 
-  const inputs: MatcherInputSection[] = parsedJson.sections.map((s) => {
-    const cls = classificationById.get(s.id);
-    return {
-      id: s.id,
-      classifiedType: cls?.type ?? "other",
-      classifiedConfidence: cls?.confidence ?? 0,
-      heading: s.content?.heading,
-      text: s.content?.text ?? "",
-      headings: Array.isArray(s.content?.headings) ? s.content.headings : [],
-      images: Array.isArray(s.content?.images) ? s.content.images : [],
-      links: Array.isArray(s.content?.links) ? s.content.links : [],
-      wordCount: s.content?.wordCount ?? 0,
-    };
-  });
+  const rawModules: IndexedModule[] =
+    Array.isArray((themeIndex.modules_json as { modules?: unknown })?.modules)
+      ? ((themeIndex.modules_json as { modules: IndexedModule[] }).modules)
+      : [];
 
-  // Mark as matching
+  const catalog: CatalogEntry[] = rawModules
+    .filter((m): m is IndexedModule & { name: string; path: string } =>
+      typeof m.name === "string" && typeof m.path === "string"
+    )
+    .map((m) => ({
+      name: m.name,
+      label: typeof m.label === "string" ? m.label : undefined,
+      path: m.path,
+      apiPath: typeof m.apiPath === "string" ? m.apiPath : undefined,
+      fieldDetails: Array.isArray(m.fieldDetails)
+        ? (m.fieldDetails as CatalogEntry["fieldDetails"])
+        : undefined,
+      renderSummaryText: typeof m.renderSummaryText === "string" ? m.renderSummaryText : undefined,
+    }));
+
+  // Load rulebook (may be null)
+  const rulebook = await loadRulebook(project.hub_id, project.theme_path);
+
+  // Soft nudge: if no rulebook AND user didn't force legacy, return a hint
+  if (!rulebook && force !== "legacy") {
+    return NextResponse.json({
+      ok: false,
+      reason: "no_rulebook",
+      message:
+        "No rulebook exists for this theme. Setting one up takes about 10 minutes and significantly improves matching accuracy. You can also proceed without one — match quality will be lower.",
+      hubId: project.hub_id,
+      themePath: project.theme_path,
+    }, { status: 409 });
+  }
+
+  // If user forced legacy OR rulebook exists, run the rulebook matcher
+  // (When rulebook is null but force=legacy, the matcher falls back to rich text for everything)
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json(
+      { ok: false, error: "Server configuration error: missing API key" },
+      { status: 500 }
+    );
+  }
+
+  const sections = (page.parsed_json as { sections?: unknown[] })?.sections ?? [];
+
   await supabase
     .from("migration_pages")
     .update({ status: "matching", status_message: null })
     .eq("id", pageId);
 
-  let results;
+  let result;
   try {
-    results = await matchSections(inputs, catalog);
+    result = await matchPageWithRulebook({
+      apiKey,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      sections: sections as any,
+      catalog,
+      rulebook,
+    });
   } catch (err) {
-    console.error("[match] failed:", err);
-    const msg = (err as Error).message ?? "Matcher failed";
+    const msg = `Matching failed: ${(err as Error).message}`;
     await supabase
       .from("migration_pages")
       .update({ status: "error", status_message: msg })
@@ -207,10 +146,17 @@ export async function POST(
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
 
-  const { data: updated, error: updateError } = await supabase
+  const matchesPayload = {
+    sections: result.matches,
+    patterns: result.patterns,
+    rulebookUsed: result.rulebookUsed,
+    matchedAt: new Date().toISOString(),
+  };
+
+  const { data: updated } = await supabase
     .from("migration_pages")
     .update({
-      matches_json: { sections: results, matchedAt: new Date().toISOString() },
+      matches_json: matchesPayload,
       status: "matched",
       status_message: null,
     })
@@ -218,21 +164,25 @@ export async function POST(
     .select()
     .single();
 
-  if (updateError) {
-    return NextResponse.json(
-      { ok: false, error: "Failed to save matches" },
-      { status: 500 }
-    );
-  }
-
   await logAudit({
     userId: null,
     hubId: project.hub_id,
-    action: "migration.completed",
+    action: "page.updated",
     resourceType: "page",
     resourceId: pageId,
-    metadata: { step: "match", match_count: results.length },
+    metadata: {
+      step: "match",
+      rulebookUsed: result.rulebookUsed,
+      sectionCount: result.matches.length,
+      fallbackCount: result.matches.filter((m) => m.isFallback).length,
+    },
   });
 
-  return NextResponse.json({ ok: true, page: updated, matches: results });
+  return NextResponse.json({
+    ok: true,
+    page: updated,
+    matches: result.matches,
+    patterns: result.patterns,
+    rulebookUsed: result.rulebookUsed,
+  });
 }
