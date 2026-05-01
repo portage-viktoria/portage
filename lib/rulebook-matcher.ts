@@ -53,10 +53,6 @@ export type CatalogEntry = {
   renderSummaryText?: string;
 };
 
-// ============================================================
-// Field mapping for a single section against a known module
-// ============================================================
-
 function summarizeSectionForMapping(s: ParsedSection) {
   return {
     id: s.id,
@@ -156,10 +152,6 @@ Return strictly this JSON shape, no preamble:
   };
 }
 
-// ============================================================
-// Rich text fallback construction (no Claude call)
-// ============================================================
-
 function buildRichTextFallback(section: ParsedSection, pattern: SectionPattern, reasoning: string): SectionMatch {
   return {
     sectionId: section.id,
@@ -180,12 +172,8 @@ function buildRichTextFallback(section: ParsedSection, pattern: SectionPattern, 
   };
 }
 
-// ============================================================
-// Top-level: match all sections in a page
-// ============================================================
-
 export type MatchPageArgs = {
-  apiKey: string; // kept for compatibility; callAnthropic reads env directly
+  apiKey: string;
   sections: ParsedSection[];
   catalog: CatalogEntry[];
   rulebook: Rulebook | null;
@@ -200,13 +188,11 @@ export type MatchPageResult = {
 export async function matchPageWithRulebook(args: MatchPageArgs): Promise<MatchPageResult> {
   const { apiKey, sections, catalog, rulebook } = args;
 
-  // Step 1: classify all sections
   const patterns = await classifySections(apiKey, sections);
   const patternBySection = new Map(patterns.map((p) => [p.sectionId, p]));
 
   const catalogByName = new Map(catalog.map((m) => [m.name, m]));
 
-  // Step 2: process each section sequentially
   const matches: SectionMatch[] = [];
   for (const section of sections) {
     const patternResult = patternBySection.get(section.id);

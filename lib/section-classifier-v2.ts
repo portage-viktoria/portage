@@ -47,7 +47,7 @@ function summarizeSection(s: ParsedSection) {
 }
 
 export async function classifySections(
-  _apiKey: string, // kept for compatibility; callAnthropic reads env directly
+  _apiKey: string,
   sections: ParsedSection[]
 ): Promise<SectionPatternResult[]> {
   if (sections.length === 0) return [];
@@ -55,7 +55,7 @@ export async function classifySections(
   const summaries = sections.map(summarizeSection);
 
   const patternList = PATTERNS
-    .filter((p) => p.id !== "rich-text-fallback") // fallback is implicit
+    .filter((p) => p.id !== "rich-text-fallback")
     .map((p) => `  - "${p.id}": ${p.classifierExamples}`)
     .join("\n");
 
@@ -85,7 +85,6 @@ Return strictly this JSON shape, no preamble or commentary:
       messages: [{ role: "user", content: prompt }],
     });
   } catch {
-    // Couldn't reach Claude — assign rich-text-fallback to all
     return sections.map((s) => ({
       sectionId: s.id,
       pattern: "rich-text-fallback" as SectionPattern,
