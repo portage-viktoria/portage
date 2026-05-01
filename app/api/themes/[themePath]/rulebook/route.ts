@@ -43,7 +43,7 @@ export async function GET(
   // Load theme catalog so the editor can show available modules
   const { data: themeIndex } = await supabase
     .from("theme_indexes")
-    .select("modules_json, scanned_at")
+    .select("modules_json, indexed_at")
     .eq("hub_id", hubId)
     .eq("theme_path", themePath)
     .maybeSingle();
@@ -86,7 +86,7 @@ export async function GET(
     ok: true,
     rulebook,
     modules: moduleSummaries,
-    scannedAt: themeIndex.scanned_at,
+    scannedAt: themeIndex.indexed_at,
   });
 }
 
