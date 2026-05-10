@@ -1,0 +1,1250 @@
+<!--
+  templateType: page
+  isAvailableForNewContent: true
+  label: Reference Tempate
+-->
+{#  This is where the base.html template will be referenced #}
+{% extends "./../layouts/base.html" %}
+{#  This is the start of the body and the drag and drop area #}
+{% block body %}
+  {% dnd_area "DnD_Area", class="main" %}
+
+{# 
+  MODULE: Two Column w Image
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Two Column w Image
+
+  USE WHEN:
+  Standard two-column content section with text/content on one side 
+  and an image on the other. Supports optional CTA buttons, background 
+  color styling, and animation settings. Good for Hero section.
+
+  FEATURES:
+    - Heading and supporting content
+    - Optional CTA button repeater
+    - Image support
+    - Background color options
+    - Text alignment controls
+    - Animation settings
+    - Responsive visibility settings
+
+  MAIN FIELDS:
+    - title (text): Main heading
+    - supporting_content (richtext): Body content
+    - button (repeater): CTA buttons
+    - image.image_selection (image): Section image
+    - styles.background.color (color): Background color
+    - alignment (choice): left | center | right
+    - show_button (boolean): Toggle CTA buttons
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/Two Column w Image",
+        offset=0,
+        width=12,
+        content={
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "tertiary",
+            "text" : "CTA Button"
+          }, {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "secondary",
+            "text" : "CTA Button 2"
+          } ],
+          "show_button" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>",
+          "title" : "H1 Title Goes Here"
+        },
+        image={
+          "image_selection" : {
+            "alt" : "pexels-anna-shvets-5894088",
+            "height" : 853,
+            "loading" : "lazy",
+            "max_height" : 853,
+            "max_width" : 1280,
+            "size_type" : "auto",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg",
+            "width" : 1280
+          }
+        },
+        styles={
+          "background" : {
+            "section_background_type" : "color",
+            "section_bg_color" : "primary"
+          },
+          "container" : {
+            "section_style" : "dark"
+          }
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+{# 
+  MODULE: Full Image w Content
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Full Image w Content
+
+  USE WHEN:
+  Two-column section with one full column covered by an image and 
+  supporting content on the opposite side. Ideal for landing pages, 
+  feature highlights, promotional sections, or storytelling layouts 
+  with optional CTA buttons and background styling.
+
+  FEATURES:
+    - Full-height image column
+    - Content aligned left or right
+    - Optional CTA button repeater
+    - Background color support
+    - Reversible column layout
+    - Heading type selection (H1–H6)
+    - Responsive-friendly layout controls
+
+  MAIN FIELDS:
+    - content.title (text): Main heading
+    - content.title_type (choice): Heading tag (h1–h6)
+    - content.supporting_content (richtext): Body content
+    - content.button (repeater): CTA buttons
+    - content.show_button (boolean): Toggle CTA buttons
+    - image.image_selection (image): Full column image
+    - styles.background (group): Section background settings
+    - styles.columns.reverse_columns (boolean): Reverse image/content layout
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_module
+    path="/Bluleadz Starter Theme - LP v2/modules/Full Image w Content",
+    offset=0,
+    width=12,
+    styles={
+      "background" : {
+        "section_background_type" : "color",
+        "section_bg_color" : "custom",
+        "section_bg_color_custom" : {
+          "color" : "#f7f7f7",
+          "opacity" : 100
+        }
+      },
+      "columns" : {
+        "reverse_columns" : {
+          "desktop" : true
+        }
+      }
+    },
+    image={
+      "image_selection" : {
+        "alt" : "pexels-anna-shvets-5894088",
+        "height" : 853,
+        "loading" : "lazy",
+        "max_height" : 853,
+        "max_width" : 1280,
+        "size_type" : "auto",
+        "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg",
+        "width" : 1280
+      }
+    },
+    content={
+      "button" : [ {
+        "link" : {
+          "no_follow" : false,
+          "open_in_new_tab" : false,
+          "url" : {
+            "href" : "#0",
+            "type" : "EXTERNAL"
+          }
+        },
+        "style" : "primary",
+        "text" : "CTA Button"
+      } ],
+      "show_button" : true,
+      "supporting_content" : "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>",
+      "title" : "H1 Title Goes Here",
+      "title_type" : "h1"
+    }
+  %}
+  {% end_dnd_module %}
+{% end_dnd_section %}
+
+
+{# 
+  MODULE: One Column
+  PATH: /Bluleadz Starter Theme - LP v2/modules/One Column
+
+  USE WHEN:
+  Flexible single-column content section commonly used for hero areas, 
+  introductory sections, banners, or supporting content throughout the page. 
+  Supports full-width background images with optional color overlays, CTA 
+  buttons, alignment controls, and animation settings.
+
+  FEATURES:
+    - Full-width background image support
+    - Optional color overlay with blend modes
+    - Single-column content layout
+    - Left, center, or right content alignment
+    - Optional CTA button repeater
+    - Heading type selection (H1–H6)
+    - Animation settings
+    - Container width controls
+    - Dark/light section styling options
+
+  MAIN FIELDS:
+    - column.title (text): Main heading
+    - column.title_type (choice): Heading tag (h1–h6)
+    - column.supporting_content (richtext): Body content
+    - column.alignment (choice): Content alignment
+    - column.button (repeater): CTA buttons
+    - column.button_alignment (choice): CTA alignment
+    - column.show_button (boolean): Toggle CTA buttons
+    - column.additional_options.animation (group): Animation settings
+
+  STYLE FIELDS:
+    - styles.background.section_background_type (choice): Background type
+    - styles.background.section_bg_image (image): Background image
+    - styles.background.overlay (group): Overlay settings
+    - styles.container.section_style (choice): Light/dark styling
+    - styles.container.width_selection (choice): Container width control
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/One Column",
+        offset=0,
+        width=12,
+        column=[ {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "alignment" : "start",
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "primary",
+            "text" : "CTA Button"
+          } ],
+          "button_alignment" : "start",
+          "show_button" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p>",
+          "title" : "H1 Title Goes Here",
+          "title_type" : "h1"
+        } ],
+        styles={
+          "background" : {
+            "overlay" : {
+              "overlay_blend" : "multiply",
+              "overlay_color" : "primary",
+              "overlay_opacity" : 80,
+              "show_overlay" : true
+            },
+            "section_background_type" : "image",
+            "section_bg_image" : {
+              "background_position" : "MIDDLE_CENTER",
+              "background_size" : "cover",
+              "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg"
+            }
+          },
+          "container" : {
+            "section_style" : "dark",
+            "width_selection" : "container"
+          }
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+{# 
+  MODULE: Icon Columns
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Icon Columns
+
+  USE WHEN:
+  Repeater-based multi-column content section used for displaying 
+  repeated content such as features, services, core values, process 
+  steps, statistics, or benefit cards. Supports optional icons, links, 
+  card styling, animations, and flexible column layouts.
+
+  FEATURES:
+    - Repeater-based card system
+    - Unlimited number of cards (minimum of 2 recommended)
+    - Optional icons per card
+    - Optional links per card
+    - Section heading and supporting content
+    - Configurable desktop column layout
+    - Card background and border radius styling
+    - Animation settings per card
+    - Flexible content structure for many use cases
+
+  MAIN FIELDS:
+    - show_section_title (boolean): Toggle section heading area
+    - section_title.title (text): Section heading
+    - section_title.supporting_content (richtext): Section intro content
+
+    - column (repeater): Repeating content cards
+      - column.title (text): Card title
+      - column.supporting_content (richtext): Card body content
+      - column.icon (image): Optional card icon
+      - column.show_link (boolean): Toggle optional card link
+      - column.link (group): Optional card link settings
+      - column.additional_options.animation (group): Animation settings
+
+  STYLE FIELDS:
+    - styles.columns.layout.desktop (number): Number of desktop columns
+    - styles.columns.card_styles.card_style (choice): Card style theme
+    - styles.columns.card_styles.background_color_selection (choice): Card background color
+    - styles.columns.card_styles.card_border_radius (number): Card corner radius
+
+  NOTES:
+    - This module is fully repeater-based and is not limited to three cards.
+    - Cards can be added or removed dynamically depending on content needs.
+    - Icons and links are completely optional for each individual card.
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/Icon Columns",
+        offset=0,
+        width=12,
+        show_section_title=true,
+        section_title={
+          "supporting_content" : "<p>Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>",
+          "title" : "H2 Title Goes Here"
+        },
+        column=[ {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "icon" : {
+            "alt" : "icon--rocket",
+            "height" : 400,
+            "loading" : "lazy",
+            "max_height" : 70,
+            "max_width" : 70,
+            "size_type" : "auto_custom_max",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/axxelus-homepage/icon--rocket.svg",
+            "width" : 400
+          },
+          "link" : {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "text" : "Card Link"
+          },
+          "show_link" : true,
+          "supporting_content" : "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>",
+          "title" : "H4 Title Goes Here"
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "icon" : {
+            "alt" : "icon--rocket",
+            "height" : 400,
+            "loading" : "lazy",
+            "max_height" : 70,
+            "max_width" : 70,
+            "size_type" : "auto_custom_max",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/axxelus-homepage/icon--rocket.svg",
+            "width" : 400
+          },
+          "link" : {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "text" : "Card Link"
+          },
+          "show_link" : true,
+          "supporting_content" : "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>",
+          "title" : "H4 Title Goes Here"
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "icon" : {
+            "alt" : "icon--rocket",
+            "height" : 400,
+            "loading" : "lazy",
+            "max_height" : 70,
+            "max_width" : 70,
+            "size_type" : "auto_custom_max",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/axxelus-homepage/icon--rocket.svg",
+            "width" : 400
+          },
+          "link" : {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "text" : "Card Link"
+          },
+          "show_link" : true,
+          "supporting_content" : "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>",
+          "title" : "H4 Title Goes Here"
+        } ],
+        styles={
+          "columns" : {
+            "card_styles" : {
+              "background_color_selection" : "light",
+              "card_border_radius" : 15,
+              "card_style" : "light"
+            },
+            "layout" : {
+              "desktop" : 3
+            }
+          }
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+{# 
+  MODULE: Two Column w Icon List
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Two Column w Icon List
+
+  USE WHEN:
+  Two-column content section with supporting content on one side and 
+  a repeater-based icon list on the other. Ideal for highlighting 
+  services, benefits, features, process steps, differentiators, or 
+  key points in a structured and scannable layout.
+
+  FEATURES:
+    - Two-column responsive layout
+    - Repeater-based icon list
+    - Flexible content and icon combinations
+    - Optional background color styling
+    - Configurable column width ratios
+    - Vertical alignment controls
+    - Supports unlimited list items
+    - Ideal for feature/benefit-driven sections
+
+  MAIN FIELDS:
+    - content.title (text): Main section heading
+    - content.supporting_content (richtext): Intro/supporting content
+
+    - icon_list.item (repeater): Repeating icon list items
+      - item.title (text): List item title
+      - item.supporting_content (richtext): List item description
+      - item.icon (image): List item icon
+
+  STYLE FIELDS:
+    - styles.background.section_background_type (choice): Background type
+    - styles.background.section_bg_color (choice): Background color
+    - styles.columns.layout.desktop (choice): Desktop column ratio/layout
+    - styles.columns.layout.vertical_alignment (choice): Vertical content alignment
+
+  NOTES:
+    - The icon list is fully repeater-based and supports any number of items.
+    - Best used for concise, repeatable content blocks with visual icon support.
+    - Icons are recommended for consistency, clarity, and visual hierarchy.
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/Two Column w Icon List",
+        offset=0,
+        width=12,
+        content={
+          "supporting_content" : "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>",
+          "title" : "H2 Title Goes Here"
+        },
+        icon_list={
+          "item" : [ {
+            "icon" : {
+              "alt" : "icon--rocket",
+              "height" : 400,
+              "loading" : "lazy",
+              "max_height" : 40,
+              "max_width" : 40,
+              "size_type" : "auto_custom_max",
+              "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/axxelus-homepage/icon--rocket.svg",
+              "width" : 400
+            },
+            "supporting_content" : "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p>",
+            "title" : "H4 Title Goes Here"
+          }, {
+            "icon" : {
+              "alt" : "icon--rocket",
+              "height" : 400,
+              "loading" : "lazy",
+              "max_height" : 40,
+              "max_width" : 40,
+              "size_type" : "auto_custom_max",
+              "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/axxelus-homepage/icon--rocket.svg",
+              "width" : 400
+            },
+            "supporting_content" : "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p>",
+            "title" : "H4 Title Goes Here"
+          }, {
+            "icon" : {
+              "alt" : "icon--rocket",
+              "height" : 400,
+              "loading" : "lazy",
+              "max_height" : 40,
+              "max_width" : 40,
+              "size_type" : "auto_custom_max",
+              "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/axxelus-homepage/icon--rocket.svg",
+              "width" : 400
+            },
+            "supporting_content" : "<p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur.</p>",
+            "title" : "H4 Title Goes Here"
+          } ]
+        },
+        styles={
+          "background" : {
+            "section_background_type" : "color",
+            "section_bg_color" : "secondary"
+          },
+          "columns" : {
+            "layout" : {
+              "desktop" : "five_seven",
+              "vertical_alignment" : "center"
+            }
+          }
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+{# 
+  MODULE: Accordion
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Accordion
+
+  USE WHEN:
+  Expandable accordion section used for FAQs, common questions, process 
+  explanations, policies, service breakdowns, or any repeatable content 
+  that benefits from a condensed and interactive layout.
+
+  FEATURES:
+    - Repeater-based accordion items
+    - Unlimited number of accordion entries
+    - Expand/collapse interaction for content organization
+    - Optional section heading and intro content
+    - Optional CTA buttons within accordion panels
+    - Individual animation settings per accordion item
+    - Flexible content structure for long-form supporting content
+    - Ideal for FAQ and educational content sections
+
+  MAIN FIELDS:
+    - show_section_title (boolean): Toggle section heading area
+    - section_title.title (text): Section heading
+    - section_title.supporting_content (richtext): Section intro content
+
+    - accordion_item (repeater): Repeating accordion entries
+      - accordion_item.title (text): Accordion/question title
+      - accordion_item.supporting_content (richtext): Expandable answer/content
+      - accordion_item.show_button (boolean): Toggle optional CTA button
+      - accordion_item.button (repeater): Optional CTA button(s)
+      - accordion_item.button_alignment (choice): CTA alignment
+      - accordion_item.additional_options.animation (group): Animation settings
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/Accordion",
+        offset=0,
+        width=12,
+        show_section_title=true,
+        section_title={
+          "supporting_content" : "<p>Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>",
+          "title" : "H2 Title Goes Here"
+        },
+        accordion_item=[ {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "primary",
+            "text" : "Learn More"
+          } ],
+          "button_alignment" : "start",
+          "show_button" : false,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "Question Title Goes Here"
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "primary",
+            "text" : "Learn More"
+          } ],
+          "button_alignment" : "start",
+          "show_button" : false,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "Question Title Goes Here"
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "primary",
+            "text" : "Learn More"
+          } ],
+          "button_alignment" : "start",
+          "show_button" : false,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "Question Title Goes Here"
+        } ]
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+{# 
+  MODULE: Image Cards
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Image Cards
+
+  USE WHEN:
+  Repeater-based image card section used for displaying services, blog-style 
+  content, featured resources, team highlights, case studies, locations, or 
+  any repeated content that benefits from strong visual support.
+
+  FEATURES:
+    - Repeater-based card layout
+    - Unlimited number of cards
+    - Image, content, and optional CTA per card
+    - Optional section heading and intro content
+    - Responsive image height controls
+    - Card styling and border radius options
+    - Animation settings per card
+
+  MAIN FIELDS:
+    - show_section_title (boolean): Toggle section heading area
+    - section_title.title (text): Section heading
+    - section_title.title_type (choice): Heading tag (h1–h6)
+    - section_title.supporting_content (richtext/text): Section intro content
+
+    - column (repeater): Repeating image cards
+      - column.image (image): Card image
+      - column.title (text): Card title
+      - column.supporting_content (richtext): Card body content
+      - column.show_link (boolean): Toggle optional CTA link/button
+      - column.link (group): CTA link/button settings
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/Image Cards",
+        offset=0,
+        width=12,
+        show_section_title=true,
+        section_title={
+          "supporting_content" : "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.",
+          "title" : "H3 Title Goes Here",
+          "title_type" : "h3"
+        },
+        column=[ {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "image" : {
+            "alt" : "pexels-anna-shvets-5894088",
+            "height" : 853,
+            "loading" : "lazy",
+            "max_height" : 853,
+            "max_width" : 1280,
+            "size_type" : "auto_custom_max",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg",
+            "width" : 1280
+          },
+          "link" : {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "text" : "CTA Button"
+          },
+          "show_link" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "H4 Title Goes Here"
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "image" : {
+            "alt" : "pexels-anna-shvets-5894088",
+            "height" : 853,
+            "loading" : "lazy",
+            "max_height" : 853,
+            "max_width" : 1280,
+            "size_type" : "auto_custom_max",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg",
+            "width" : 1280
+          },
+          "link" : {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "text" : "CTA Button"
+          },
+          "show_link" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "H4 Title Goes Here"
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "image" : {
+            "alt" : "pexels-anna-shvets-5894088",
+            "height" : 853,
+            "loading" : "lazy",
+            "max_height" : 853,
+            "max_width" : 1280,
+            "size_type" : "auto_custom_max",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg",
+            "width" : 1280
+          },
+          "link" : {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "text" : "CTA Button"
+          },
+          "show_link" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "H4 Title Goes Here"
+        } ],
+        styles={
+          "columns" : {
+            "card_styles" : {
+              "background_color_selection" : "light",
+              "card_border_radius" : 15,
+              "image_height" : {
+                "desktop" : 300,
+                "mobile" : 400,
+                "tablet" : 300
+              }
+            }
+          }
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+{# 
+  MODULE: Image Gallery
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Image Gallery
+
+  USE WHEN:
+  Repeater-based image gallery section used for showcasing photography, 
+  portfolio work, facilities, products, team culture, event recaps, 
+  project highlights, or any highly visual content collection.
+
+  MAIN FIELDS:
+    - show_section_title (boolean): Toggle section heading area
+    - section_title.title (text): Section heading
+    - section_title.supporting_content (richtext): Section intro content
+
+    - gallery (repeater): Repeating gallery items
+      - gallery.image_selection (image): Gallery image
+      - gallery.caption (text/richtext): Optional image caption
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/Image Gallery",
+        offset=0,
+        width=12,
+        gallery=[ {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "caption" : "",
+          "image_selection" : {
+            "alt" : "pexels-anna-shvets-5894088",
+            "height" : 853,
+            "loading" : "lazy",
+            "max_height" : 853,
+            "max_width" : 1280,
+            "size_type" : "auto",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg",
+            "width" : 1280
+          }
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "caption" : "",
+          "image_selection" : {
+            "alt" : "pexels-anna-shvets-5894088",
+            "height" : 853,
+            "loading" : "lazy",
+            "max_height" : 853,
+            "max_width" : 1280,
+            "size_type" : "auto",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg",
+            "width" : 1280
+          }
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "caption" : "",
+          "image_selection" : {
+            "alt" : "pexels-anna-shvets-5894088",
+            "height" : 853,
+            "loading" : "lazy",
+            "max_height" : 853,
+            "max_width" : 1280,
+            "size_type" : "auto",
+            "src" : "https://4965458.fs1.hubspotusercontent-na2.net/hubfs/4965458/Flora%20Theme/Stock%20Images/pexels-anna-shvets-5894088.jpeg",
+            "width" : 1280
+          }
+        } ],
+        show_section_title=true,
+        section_title={
+          "supporting_content" : "<p>Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>",
+          "title" : "H2 Title Goes Here"
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+{# 
+  MODULE: Two Column
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Two Column
+
+  USE WHEN:
+  Flexible two-column content section used for side-by-side layouts such as 
+  text/content combinations, comparisons, embedded media, forms, videos, 
+  CTAs, or mixed content experiences. Commonly used for content sections, 
+  lead generation layouts, and informational split sections.
+
+  MAIN FIELDS:
+    - column (repeater - max 2): Two content columns
+      - column.title (text): Column heading
+      - column.title_type (choice): Heading tag (h1–h6)
+      - column.supporting_content (richtext): Main content area
+      - column.alignment (choice): Content alignment
+      - column.button (repeater): Optional CTA button(s)
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/Two Column",
+        offset=0,
+        width=12,
+        column=[ {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            },
+            "hide_column_on" : {
+              "desktop" : false,
+              "mobile" : false,
+              "tablet" : false
+            }
+          },
+          "alignment" : "start",
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "primary",
+            "text" : "CTA Button"
+          } ],
+          "button_alignment" : "left",
+          "show_button" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "H2 Title Goes Here",
+          "title_type" : "h2"
+        }, {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            },
+            "hide_column_on" : {
+              "desktop" : false,
+              "mobile" : false,
+              "tablet" : false
+            }
+          },
+          "alignment" : "start",
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "primary",
+            "text" : "CTA Button"
+          } ],
+          "button_alignment" : "left",
+          "show_button" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "H2 Title Goes Here",
+          "title_type" : "h2"
+        } ],
+        styles={
+          "columns" : {
+            "layout" : {
+              "desktop" : "six_six",
+              "tablet" : "full_width"
+            }
+          }
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+{# 
+  MODULE: Two Column w Form
+  PATH: /Bluleadz Starter Theme - LP v2/modules/Two Column w Form
+
+  USE WHEN:
+  Two-column lead generation section with supporting content on one side 
+  and a HubSpot form on the other. Ideal for contact sections, gated content, 
+  demo requests, consultations, webinar registrations, or conversion-focused 
+  landing page sections.
+
+  MAIN FIELDS:
+    - column.title (text): Main content heading
+    - column.supporting_content (richtext): Supporting content/body copy
+    - column.button (repeater): Optional CTA button(s)
+    - form.title (text): Form section heading
+    - form.supporting_content (richtext): Form intro/supporting content
+    - form.form_selection (group): HubSpot form settings
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/Two Column w Form",
+        offset=0,
+        width=12,
+        column={
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "secondary",
+            "text" : "CTA Button"
+          } ],
+          "show_button" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "H2 Title Goes Here"
+        },
+        form={
+          "form_selection" : {
+            "form_id" : "356e46f7-1399-41a7-a7db-9c81d2ca8f33",
+            "form_type" : "HUBSPOT",
+            "message" : "Thanks for submitting the form.",
+            "response_type" : "inline"
+          },
+          "supporting_content" : "<p>Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>",
+          "title" : "Form Title"
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}  
+
+
+{# 
+  MODULE: One Column CTA
+  PATH: /Bluleadz Starter Theme - LP v2/modules/One Column
+
+  USE WHEN:
+  Centered call-to-action (CTA) section used for conversions, final 
+  page prompts, signup pushes, promotional banners, or any focused 
+  single-message section designed to drive user action.
+
+  MAIN FIELDS:
+    - column.title (text): CTA headline
+    - column.title_type (choice): Heading tag (h1–h6)
+    - column.supporting_content (richtext): Supporting CTA message
+    - column.alignment (choice): Content alignment (typically center)
+    - column.button (repeater): CTA button(s)
+#}
+
+{% dnd_section
+  full_width=true
+%}
+  {% dnd_column
+    offset=0,
+    width=12
+  %}
+    {% dnd_row %}
+      {% dnd_module
+        path="/Bluleadz Starter Theme - LP v2/modules/One Column",
+        offset=0,
+        width=12,
+        column=[ {
+          "additional_options" : {
+            "animation" : {
+              "delay" : 0,
+              "direction" : "right",
+              "show_animation" : false,
+              "style" : "zoom-in"
+            }
+          },
+          "alignment" : "center",
+          "button" : [ {
+            "link" : {
+              "no_follow" : false,
+              "open_in_new_tab" : false,
+              "url" : {
+                "href" : "#0",
+                "type" : "EXTERNAL"
+              }
+            },
+            "style" : "tertiary",
+            "text" : "Button Text"
+          } ],
+          "button_alignment" : "center",
+          "show_button" : true,
+          "supporting_content" : "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</p>",
+          "title" : "CTA Section Title",
+          "title_type" : "h2"
+        } ],
+        styles={
+          "background" : {
+            "section_background_type" : "color",
+            "section_bg_color" : "primary"
+          },
+          "container" : {
+            "section_style" : "dark",
+            "width_selection" : "container container-xnarrow"
+          }
+        }
+      %}
+      {% end_dnd_module %}
+    {% end_dnd_row %}
+  {% end_dnd_column %}
+{% end_dnd_section %}
+
+  {% end_dnd_area %}
+{% endblock body %}

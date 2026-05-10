@@ -1,31 +1,32 @@
 /**
- * HubSpot publishing helpers — v7 (Phase 4: defaults merging).
+ * HubSpot publishing helpers — v9 (reference-catalog era).
  *
- * Key change in v7: pull each module's `defaults` from the indexed catalog
- * and merge our matcher's params ON TOP of those defaults. This ensures:
+ * The publisher now consumes a catalog of canonical module instances and
+ * applies substitutions to their demo content rather than building params
+ * from scratch.
  *
- *   1. Required fields the module needs always have valid values
- *   2. Modules render even when our matcher misses fields
- *   3. We never break a module by sending only a subset of expected keys
+ * Per matched section:
+ *   1. Look up the catalog entry's demoParams
+ *   2. Deep clone them
+ *   3. Apply substitutions (title, body, image, link, repeater items)
+ *      using the rules locked in earlier
+ *   4. Strip non-payload params (path, offset, width, etc. that belong to
+ *      the {% dnd_module %} tag, not the module instance JSON)
+ *   5. Emit as a single dnd_area-module-N row
  *
- * The public createHubSpotPage signature now accepts the catalog so we can
- * look up each matched module's defaults at publish time.
+ * Style decisions (alignment, animation, background, container, layout,
+ * button styles) are preserved verbatim from the demo.
  */
 
 import crypto from "crypto";
+import type { ReferenceCatalog, ReferenceCatalogEntry } from "./reference-catalog";
+import type { Substitutions, SectionMatch } from "./reference-matcher";
 
 const HUBSPOT_API_BASE = "https://api.hubapi.com";
 
-function cleanTemplatePath(p: string): string {
-  return p.replace(/^\/+/, "").replace(/\/+$/, "");
-}
-
-function ensureLeadingSlashForModule(p: string): string {
-  if (!p) return p;
-  if (p.startsWith("@")) return p;
-  if (p.startsWith("/")) return p;
-  return `/${p}`;
-}
+// Keys in the parsed dnd_module body that are tag-level metadata, NOT
+// content fields. We strip them before publishing.
+const TAG_LEVEL_KEYS = new Set(["path", "offset", "width", "full_width"]);
 
 // ============================================================
 // Types
@@ -43,32 +44,8 @@ export type ParsedSection = {
   };
 };
 
-export type FieldMapping = {
-  fieldName: string;
-  fieldType: string;
-  source: "heading" | "text" | "image" | "link" | "literal" | "list";
-  value?: string;
-  description: string;
-};
-
-export type SectionMatch = {
-  sectionId: string;
-  matchedModule: string;
-  matchedModulePath: string;
-  confidence: number;
-  reasoning: string;
-  fieldMappings: FieldMapping[];
-  isFallback: boolean;
-};
-
-// Catalog entry needed by the publisher for defaults merging.
-// Matches the shape produced by indexer v3.
-export type CatalogModule = {
-  name: string;
-  path: string;
-  apiPath?: string;
-  defaults?: Record<string, unknown>;
-};
+// Re-export so existing imports work
+export type { SectionMatch } from "./reference-matcher";
 
 // ============================================================
 // Tier detection
@@ -76,7 +53,7 @@ export type CatalogModule = {
 
 export async function detectStagingAvailable(accessToken: string): Promise<boolean> {
   try {
-    const stageProbe = await fetch(
+    const res = await fetch(
       `${HUBSPOT_API_BASE}/cms/v3/pages/site-pages?contentStagingState=STAGING&limit=1`,
       {
         method: "GET",
@@ -86,14 +63,14 @@ export async function detectStagingAvailable(accessToken: string): Promise<boole
         },
       }
     );
-    return stageProbe.ok;
+    return res.ok;
   } catch {
     return false;
   }
 }
 
 // ============================================================
-// Image upload
+// Image upload (unchanged)
 // ============================================================
 
 function urlHash(url: string): string {
@@ -134,7 +111,11 @@ async function uploadOneImage(
   form.append("folderPath", folderPath);
   form.append(
     "options",
-    JSON.stringify({ access: "PUBLIC_INDEXABLE", overwrite: false, duplicateValidationStrategy: "NONE" })
+    JSON.stringify({
+      access: "PUBLIC_INDEXABLE",
+      overwrite: false,
+      duplicateValidationStrategy: "NONE",
+    })
   );
 
   try {
@@ -168,7 +149,6 @@ export async function uploadImagesToFileManager(
       if (img.src && img.src.startsWith("http")) uniqueUrls.add(img.src);
     }
   }
-
   if (uniqueUrls.size === 0) return new Map();
 
   const today = new Date().toISOString().slice(0, 10);
@@ -179,95 +159,311 @@ export async function uploadImagesToFileManager(
     const uploadedUrl = await uploadOneImage(accessToken, url, folder);
     result.set(url, uploadedUrl ?? url);
   }
-
   return result;
 }
 
 // ============================================================
-// Field value resolution
+// Substitution engine — the heart of v9
 // ============================================================
 
-function resolveFieldValue(
-  mapping: FieldMapping,
-  section: ParsedSection,
-  imageUrlMap: Map<string, string>
-): unknown {
-  switch (mapping.source) {
-    case "heading":
-      return section.content.heading ?? "";
-    case "text":
-      return section.content.text ?? "";
-    case "image": {
-      const idx = parseInt(mapping.value ?? "0", 10);
-      const img = section.content.images[isNaN(idx) ? 0 : idx];
-      if (!img) return "";
-      const finalUrl = imageUrlMap.get(img.src) ?? img.src;
-      return { src: finalUrl, alt: img.alt ?? "" };
+function deepClone<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function plainTextToHtml(text: string): string {
+  if (!text) return "";
+  const paragraphs = text
+    .split(/\n\s*\n/)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (paragraphs.length === 0) return "";
+  return paragraphs
+    .map(
+      (p) =>
+        `<p>${p
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/\n/g, "<br>")}</p>`
+    )
+    .join("\n");
+}
+
+/**
+ * Walk an object and replace any "title" string field with newTitle.
+ * Operates on plain string fields only — doesn't touch title_type, etc.
+ */
+function substituteTitleInObject(obj: unknown, newTitle: string): void {
+  if (obj === null || typeof obj !== "object") return;
+  if (Array.isArray(obj)) {
+    for (const item of obj) substituteTitleInObject(item, newTitle);
+    return;
+  }
+  const record = obj as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key === "title" && typeof record[key] === "string") {
+      record[key] = newTitle;
+    } else if (typeof record[key] === "object" && record[key] !== null) {
+      substituteTitleInObject(record[key], newTitle);
     }
-    case "link": {
-      const idx = parseInt(mapping.value ?? "0", 10);
-      const link = section.content.links[isNaN(idx) ? 0 : idx];
-      if (!link) return null;
-      return {
-        url: { href: link.href, type: "EXTERNAL" },
-        no_follow: false,
-        open_in_new_tab: false,
-      };
-    }
-    case "literal":
-      return mapping.value ?? "";
-    case "list":
-      // Repeater — empty array. The user adds items in the editor.
-      return [];
-    default:
-      return "";
   }
 }
 
 /**
- * Build the params for a single module instance.
+ * Walk and replace any "supporting_content" field with newBody (HTML).
+ */
+function substituteBodyInObject(obj: unknown, newBody: string): void {
+  if (obj === null || typeof obj !== "object") return;
+  if (Array.isArray(obj)) {
+    for (const item of obj) substituteBodyInObject(item, newBody);
+    return;
+  }
+  const record = obj as Record<string, unknown>;
+  for (const key of Object.keys(record)) {
+    if (key === "supporting_content" && typeof record[key] === "string") {
+      record[key] = newBody;
+    } else if (typeof record[key] === "object" && record[key] !== null) {
+      substituteBodyInObject(record[key], newBody);
+    }
+  }
+}
+
+/**
+ * Find the first object that has both "src" and "alt" properties (i.e. an
+ * image_selection-shaped object) and replace src + alt. Returns true if a
+ * substitution happened.
+ */
+function substituteFirstImage(
+  obj: unknown,
+  newSrc: string,
+  newAlt: string
+): boolean {
+  if (obj === null || typeof obj !== "object") return false;
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      if (substituteFirstImage(item, newSrc, newAlt)) return true;
+    }
+    return false;
+  }
+  const record = obj as Record<string, unknown>;
+  // Is this an image-shaped object?
+  if (
+    typeof record.src === "string" &&
+    "alt" in record &&
+    typeof record.alt === "string"
+  ) {
+    record.src = newSrc;
+    record.alt = newAlt;
+    return true;
+  }
+  // Recurse
+  for (const key of Object.keys(record)) {
+    if (typeof record[key] === "object" && record[key] !== null) {
+      if (substituteFirstImage(record[key], newSrc, newAlt)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Find the first button-shaped object (has link.url.href and a text field)
+ * and replace href + text. Returns true on success.
+ */
+function substituteFirstButton(
+  obj: unknown,
+  newHref: string,
+  newText: string
+): boolean {
+  if (obj === null || typeof obj !== "object") return false;
+  if (Array.isArray(obj)) {
+    for (const item of obj) {
+      if (substituteFirstButton(item, newHref, newText)) return true;
+    }
+    return false;
+  }
+  const record = obj as Record<string, unknown>;
+  // Is this a button object? Has "link" with "url.href" and a "text" sibling
+  if (
+    "link" in record &&
+    typeof record.link === "object" &&
+    record.link !== null
+  ) {
+    const link = record.link as Record<string, unknown>;
+    if (
+      "url" in link &&
+      typeof link.url === "object" &&
+      link.url !== null &&
+      "href" in (link.url as Record<string, unknown>)
+    ) {
+      const urlObj = link.url as Record<string, unknown>;
+      urlObj.href = newHref;
+      if (typeof record.text === "string" && newText) {
+        record.text = newText;
+      }
+      return true;
+    }
+  }
+  for (const key of Object.keys(record)) {
+    if (typeof record[key] === "object" && record[key] !== null) {
+      if (substituteFirstButton(record[key], newHref, newText)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Find a repeater field (top-level array) and adjust its length to match
+ * the source's parallel items. Each item gets title/body/image/link applied
+ * by mutating the demo-shaped clone.
+ *
+ * Strategy:
+ *   - If source has N items and demo has M:
+ *     - For each i in [0, N): clone demo item index i % M as base, apply substitutions
+ *   - This way every produced item has a complete demo-shaped structure
+ */
+function applyRepeaterItems(
+  params: Record<string, unknown>,
+  items: NonNullable<Substitutions["repeaterItems"]>,
+  imageUrlMap: Map<string, string>,
+  sourceImages: Array<{ src: string; alt?: string }>,
+  sourceLinks: Array<{ text: string; href: string }>
+): void {
+  if (items.length === 0) return;
+
+  // Find the first top-level array — that's the repeater
+  for (const key of Object.keys(params)) {
+    const value = params[key];
+    if (!Array.isArray(value) || value.length === 0) continue;
+
+    const demoItems = value;
+    const newItems: unknown[] = [];
+
+    for (let i = 0; i < items.length; i++) {
+      const sourceItem = items[i];
+      const demoItem = deepClone(demoItems[i % demoItems.length]);
+
+      if (sourceItem.title) substituteTitleInObject(demoItem, sourceItem.title);
+      if (sourceItem.text) substituteBodyInObject(demoItem, plainTextToHtml(sourceItem.text));
+      if (typeof sourceItem.imageIdx === "number") {
+        const img = sourceImages[sourceItem.imageIdx];
+        if (img) {
+          const finalUrl = imageUrlMap.get(img.src) ?? img.src;
+          substituteFirstImage(demoItem, finalUrl, img.alt ?? "");
+        }
+      }
+      if (typeof sourceItem.linkIdx === "number") {
+        const link = sourceLinks[sourceItem.linkIdx];
+        if (link) {
+          substituteFirstButton(demoItem, link.href, link.text);
+        }
+      }
+
+      newItems.push(demoItem);
+    }
+
+    params[key] = newItems;
+    return; // Only handle the first repeater
+  }
+
+  // Special case: "icon_list" wraps its items in { item: [...] }
+  if (
+    params.icon_list &&
+    typeof params.icon_list === "object" &&
+    !Array.isArray(params.icon_list)
+  ) {
+    const list = params.icon_list as Record<string, unknown>;
+    if (Array.isArray(list.item)) {
+      const demoItems = list.item;
+      const newItems: unknown[] = [];
+      for (let i = 0; i < items.length; i++) {
+        const sourceItem = items[i];
+        const demoItem = deepClone(demoItems[i % demoItems.length]);
+        if (sourceItem.title) substituteTitleInObject(demoItem, sourceItem.title);
+        if (sourceItem.text) substituteBodyInObject(demoItem, plainTextToHtml(sourceItem.text));
+        if (typeof sourceItem.imageIdx === "number") {
+          const img = sourceImages[sourceItem.imageIdx];
+          if (img) {
+            const finalUrl = imageUrlMap.get(img.src) ?? img.src;
+            substituteFirstImage(demoItem, finalUrl, img.alt ?? "");
+          }
+        }
+        newItems.push(demoItem);
+      }
+      list.item = newItems;
+    }
+  }
+}
+
+/**
+ * Build the final params object for one matched section.
  *
  * Algorithm:
- *   1. Start with module's defaults from fields.json (if catalog provided)
- *   2. Layer the matcher's resolved values on top, keyed by exact field name
- *   3. Add base required keys (path, schema_version, css_class)
- *
- * Defaults guarantee that even fields the matcher doesn't touch have valid
- * values, preventing the "module renders blank" failure mode.
+ *   1. Take the catalog entry's demoParams, deep clone
+ *   2. Strip tag-level keys (path, offset, width, full_width) — these
+ *      belong on the {% dnd_module %} tag, not in the module instance JSON
+ *   3. Apply substitutions:
+ *      - useTitle: replace any title field with section.heading
+ *      - useBody: replace any supporting_content field with section.text as HTML
+ *      - primaryImageIdx: replace first image-shaped object with the source image
+ *      - primaryLinkIdx: replace first button-shaped object with the source link
+ *      - repeaterItems: rebuild the first top-level array repeater
+ *   4. Add HubSpot's required base keys (path, schema_version, css_class)
  */
 function buildModuleParams(
   section: ParsedSection,
   match: SectionMatch,
-  imageUrlMap: Map<string, string>,
-  catalogModule: CatalogModule | undefined
+  catalogEntry: ReferenceCatalogEntry,
+  imageUrlMap: Map<string, string>
 ): Record<string, unknown> {
-  // Start with defaults from the module's fields.json
-  const params: Record<string, unknown> =
-    catalogModule?.defaults ? deepClone(catalogModule.defaults) : {};
+  const cloned = deepClone(catalogEntry.demoParams);
 
-  // Layer matcher's mapped values on top
-  for (const mapping of match.fieldMappings) {
-    const resolved = resolveFieldValue(mapping, section, imageUrlMap);
-    // Skip null/undefined so we don't blow away a default with nothing
-    if (resolved === null || resolved === undefined) continue;
-    params[mapping.fieldName] = resolved;
+  // Strip tag-level keys
+  for (const key of TAG_LEVEL_KEYS) {
+    delete cloned[key];
   }
 
-  // Required base params for any drag-and-drop module instance
-  params.path = ensureLeadingSlashForModule(
-    catalogModule?.apiPath ?? match.matchedModulePath
-  );
-  params.schema_version = 2;
-  params.css_class = "dnd-module";
+  const subs = match.substitutions;
 
-  return params;
-}
+  // Apply scalar substitutions
+  if (subs.useTitle && section.content.heading) {
+    substituteTitleInObject(cloned, section.content.heading);
+  }
+  if (subs.useBody && section.content.text) {
+    substituteBodyInObject(cloned, plainTextToHtml(section.content.text));
+  }
+  if (
+    typeof subs.primaryImageIdx === "number" &&
+    section.content.images[subs.primaryImageIdx]
+  ) {
+    const img = section.content.images[subs.primaryImageIdx];
+    const finalUrl = imageUrlMap.get(img.src) ?? img.src;
+    substituteFirstImage(cloned, finalUrl, img.alt ?? "");
+  }
+  if (
+    typeof subs.primaryLinkIdx === "number" &&
+    section.content.links[subs.primaryLinkIdx]
+  ) {
+    const link = section.content.links[subs.primaryLinkIdx];
+    substituteFirstButton(cloned, link.href, link.text);
+  }
 
-/**
- * Cheap deep clone for plain JSON values.
- */
-function deepClone<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value));
+  // Apply repeater items
+  if (subs.repeaterItems && subs.repeaterItems.length > 0) {
+    applyRepeaterItems(
+      cloned,
+      subs.repeaterItems,
+      imageUrlMap,
+      section.content.images,
+      section.content.links
+    );
+  }
+
+  // Required HubSpot base keys for module instance
+  cloned.path = match.modulePath;
+  cloned.schema_version = 2;
+  cloned.css_class = "dnd-module";
+
+  return cloned;
 }
 
 // ============================================================
@@ -282,32 +478,37 @@ function buildLayoutSections(
   sections: ParsedSection[],
   matches: SectionMatch[],
   imageUrlMap: Map<string, string>,
-  catalogByName: Map<string, CatalogModule>
+  catalog: ReferenceCatalog
 ): LayoutPayload {
   const sectionById = new Map(sections.map((s) => [s.id, s]));
+  const entryById = new Map(catalog.entries.map((e) => [e.id, e]));
+
   const rows: Array<Record<string, unknown>> = [];
   const rowMetaData: Array<Record<string, unknown>> = [];
 
   matches.forEach((match, i) => {
     const section = sectionById.get(match.sectionId);
     if (!section) return;
+    if (!match.entryId) return;
 
-    const catalogModule = catalogByName.get(match.matchedModule);
-    const params = buildModuleParams(section, match, imageUrlMap, catalogModule);
+    const entry = entryById.get(match.entryId);
+    if (!entry) return;
+
+    const params = buildModuleParams(section, match, entry, imageUrlMap);
     const moduleName = `dnd_area-module-${i + 1}`;
 
-    const moduleInstance = {
-      name: moduleName,
-      type: "custom_widget",
-      params,
-      cells: [],
-      rows: [],
-      rowMetaData: [],
-      w: 12,
-      x: 0,
-    };
-
-    rows.push({ "0": moduleInstance });
+    rows.push({
+      "0": {
+        name: moduleName,
+        type: "custom_widget",
+        params,
+        cells: [],
+        rows: [],
+        rowMetaData: [],
+        w: 12,
+        x: 0,
+      },
+    });
     rowMetaData.push({ cssClass: "dnd-section" });
   });
 
@@ -330,7 +531,7 @@ function buildLayoutSections(
 }
 
 // ============================================================
-// Create the HubSpot page
+// Create the page
 // ============================================================
 
 export type CreatePageArgs = {
@@ -338,34 +539,33 @@ export type CreatePageArgs = {
   pageTitle: string;
   pageSlug: string;
   metaDescription?: string;
-  themePath: string;
-  templateName: string;
+  themeName: string;          // project's theme name (used for templatePath)
+  templateName: string;        // e.g. "migration.html"
   sections: ParsedSection[];
   matches: SectionMatch[];
   imageUrlMap: Map<string, string>;
   contentStagingState: "STAGING" | "DRAFT";
-  // NEW: catalog modules so we can look up defaults
-  catalog?: CatalogModule[];
+  catalog: ReferenceCatalog;
 };
 
 export type CreatePageResult =
   | { ok: true; pageId: string; url?: string }
   | { ok: false; error: string };
 
-export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePageResult> {
-  const catalogByName = new Map<string, CatalogModule>(
-    (args.catalog ?? []).map((m) => [m.name, m])
-  );
+function cleanPath(p: string): string {
+  return p.replace(/^\/+/, "").replace(/\/+$/, "");
+}
 
+export async function createHubSpotPage(args: CreatePageArgs): Promise<CreatePageResult> {
   const layoutSections = buildLayoutSections(
     args.sections,
     args.matches,
     args.imageUrlMap,
-    catalogByName
+    args.catalog
   );
 
-  const cleanTheme = cleanTemplatePath(args.themePath);
-  const cleanTemplate = cleanTemplatePath(args.templateName);
+  const cleanTheme = cleanPath(args.themeName);
+  const cleanTemplate = cleanPath(args.templateName);
   const templatePath = `${cleanTheme}/templates/${cleanTemplate}`;
 
   const body: Record<string, unknown> = {
